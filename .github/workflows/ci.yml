@@ -70,7 +70,7 @@ jobs:
       - name: Zip
         run: ditto -c -k --keepParent build/SerialTerm.app build/SerialTerm.zip
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: SerialTerm-${{ github.sha }}
           path: build/SerialTerm.zip
