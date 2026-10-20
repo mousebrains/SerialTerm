@@ -6,6 +6,7 @@ public final class ZmodemTransfer: FileTransfer, @unchecked Sendable {
     public let kind: TransferKind
     public var onOutput: ((Data) -> Void)?
     public var waitForOutput: ((_ maxPending: Int) -> Void)?
+    public var discardOutput: (() -> Void)?
     public var onStatus: ((String) -> Void)?
     public var onLog: ((String) -> Void)?
     public var onFinish: ((_ success: Bool, _ message: String) -> Void)?
@@ -68,6 +69,7 @@ public final class ZmodemTransfer: FileTransfer, @unchecked Sendable {
                 self?.onOutput?(data)
             },
             drain: { [weak self] in self?.waitForOutput?($0) },
+            discard: { [weak self] in self?.discardOutput?() },
             status: { [weak self] in self?.onStatus?($0) },
             log: { [weak self] in self?.onLog?($0) }
         )

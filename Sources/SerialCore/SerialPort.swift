@@ -62,6 +62,8 @@ public final class SerialPort: @unchecked Sendable {
     /// Bytes queued by `write` but not yet accepted by the driver.
     private let pendingCondition = NSCondition()
     private var pendingBytes = 0
+    /// Bumped by `discardPendingWrites`; queued writes from an older generation are skipped.
+    private var writeGeneration = 0
 
     public init(path: String, config: SerialConfig) {
         self.path = path
@@ -137,10 +139,15 @@ public final class SerialPort: @unchecked Sendable {
     /// Queue bytes for transmission.
     public func write(_ data: Data) {
         guard !data.isEmpty else { return }
-        pendingCondition.withLock { pendingBytes += data.count }
+        let generation = pendingCondition.withLock {
+            pendingBytes += data.count
+            return writeGeneration
+        }
         writeQueue.async { [weak self] in
             guard let self else { return }
-            self.writeAll(data)
+            if self.pendingCondition.withLock({ self.writeGeneration == generation }) {
+                self.writeAll(data)
+            }
             self.pendingCondition.withLock {
                 self.pendingBytes -= data.count
                 self.pendingCondition.broadcast()
@@ -151,6 +158,14 @@ public final class SerialPort: @unchecked Sendable {
     /// Block until everything queued with `write` has been handed to the driver.
     public func waitForPendingWrites() {
         writeQueue.sync {}
+    }
+
+    /// Drop output that is queued but not yet sent: writes still waiting here, and whatever the
+    /// driver hasn't transmitted (TCOFLUSH). Used when a protocol rewinds and that data is stale.
+    public func discardPendingWrites() {
+        pendingCondition.withLock { writeGeneration += 1 }
+        let fd = lock.withLock { self.fd }
+        if fd >= 0 { tcflush(fd, TCOFLUSH) }
     }
 
     /// Block until at most `maxPending` queued bytes remain (0 = all written). Senders use a

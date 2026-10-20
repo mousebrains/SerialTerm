@@ -276,6 +276,28 @@ struct HardwareXmodemTests {
         Thread.sleep(forTimeInterval: 1)
         _ = rig.shell("rm -f y1.bin y2.bin", wait: 0.5)
     }
+    /// Cancel an XMODEM send mid-transfer; the device's rx must give up and return to the shell.
+    @Test func cancelXmodemSend() throws {
+        let dir = try tempDir()
+        let file = dir.appendingPathComponent("cancel.bin")
+        try Data(repeating: 0x5A, count: 1_000_000).write(to: file)
+        let rig = try Rig(downloads: dir)
+        defer { rig.session.close() }
+        try rig.session.startTransfer(.xmodemSend(file), startRemote: true)
+        _ = rig.events.wait(timeout: 30) { $0.filter { if case .transferStatus = $0 { true } else { false } }.count > 4 }
+        let cancelled = Date()
+        rig.session.cancelTransfer()
+        _ = rig.waitForFinish(10)
+        // Poll the shell until it answers.
+        var answer = ""
+        while Date().timeIntervalSince(cancelled) < 30 {
+            answer = rig.shell("echo ALIVE$((40+2))", wait: 1)
+            if answer.contains("ALIVE42") { break }
+        }
+        print("PROBE CANCEL: shell answered after \(String(format: "%.1f", Date().timeIntervalSince(cancelled))) s: \(answer.contains("ALIVE42"))")
+        #expect(answer.contains("ALIVE42"))
+        _ = rig.shell("rm -f cancel.bin", wait: 0.5)
+    }
 }
 
 func Insecure_md5(_ data: Data) -> String {

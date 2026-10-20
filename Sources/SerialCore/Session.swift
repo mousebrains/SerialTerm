@@ -130,6 +130,7 @@ public final class Session: @unchecked Sendable {
 
         t.onOutput = { [weak self] data in self?.port.write(data) }
         t.waitForOutput = { [weak self] in self?.port.waitForPendingWrites(maxPending: $0) }
+        t.discardOutput = { [weak self] in self?.port.discardPendingWrites() }
         t.onStatus = { [weak self] line in self?.onEvent?(.transferStatus(line)) }
         t.onLog = { [weak self] line in
             guard let self else { return }

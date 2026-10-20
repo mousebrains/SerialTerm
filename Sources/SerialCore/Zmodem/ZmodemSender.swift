@@ -7,6 +7,7 @@ final class ZLink {
     let trace: ZmodemTrace?
     private let output: (Data) -> Void
     private let drain: (Int) -> Void
+    private let discard: () -> Void
     /// Data subpackets collected into one large write: per-write overhead in USB serial
     /// drivers dominates at small sizes.
     private var batch: [UInt8] = []
@@ -20,11 +21,12 @@ final class ZLink {
     private var rateBase = 0
 
     init(reader: ZReader, trace: ZmodemTrace?, output: @escaping (Data) -> Void, drain: @escaping (Int) -> Void,
-         status: @escaping (String) -> Void, log: @escaping (String) -> Void) {
+         discard: @escaping () -> Void = {}, status: @escaping (String) -> Void, log: @escaping (String) -> Void) {
         self.reader = reader
         self.trace = trace
         self.output = output
         self.drain = drain
+        self.discard = discard
         self.status = status
         logLine = log
         reader.trace = trace
@@ -42,9 +44,11 @@ final class ZLink {
 
     func send(_ text: String) { send(Array(text.utf8)) }
 
-    /// Drops batched data that hasn't been written (it's stale after a ZRPOS).
-    func discardBatch() {
+    /// After a ZRPOS: drop data not yet on the wire, both our batch and what's queued at the
+    /// port. Otherwise the receiver must wade through it, and may ask again and again.
+    func discardUnsent() {
         batch.removeAll(keepingCapacity: true)
+        discard()
     }
 
     /// Writes out batched data.
@@ -315,9 +319,21 @@ final class ZmodemSender {
         link.startFile(at: pos)
         var errors = 0
         let blockSize = max(32, options.blockSize)
+        var lastRewind: (position: Int, time: Date)?
+
+        /// lrzsz's receiver repeats ZRPOS while it skips the data that was in flight. A repeat of
+        /// the position we just rewound to is a duplicate; acting on it would inject another ZDATA
+        /// header into the stream the receiver has resumed, and errors snowball. A repeat after
+        /// a while (e.g. the receiver's timeout) is genuine.
+        func isDuplicate(_ p: Int) -> Bool {
+            guard let last = lastRewind, last.position == p, Date().timeIntervalSince(last.time) < 2 else { return false }
+            link.log("Ignoring duplicate ZRPOS \(p) for \(name)")
+            return true
+        }
 
         func rewind(to p: Int, _ why: String) throws {
-            link.discardBatch()
+            link.discardUnsent()
+            lastRewind = (p, Date())
             errors += 1
             link.log("Resending \(name) from \(p) (\(why)); was at \(pos)")
             if errors > 30 { throw ZmodemError.tooManyErrors("\(name): receiver kept rejecting data") }
@@ -368,7 +384,11 @@ final class ZmodemSender {
                         }
                         guard let h else { continue }
                         if h.frame == .ack { continue stream }
-                        if h.frame == .rpos { try rewind(to: h.position, "ZRPOS"); continue stream }
+                        if h.frame == .rpos {
+                            if isDuplicate(h.position) { continue }
+                            try rewind(to: h.position, "ZRPOS")
+                            continue stream
+                        }
                         if h.frame == .skip { return .skipped }
                     }
                 }
@@ -378,6 +398,7 @@ final class ZmodemSender {
                     guard let h = try pollHeader() else { break }
                     switch h.frame {
                     case .rpos:
+                        if isDuplicate(h.position) { continue }
                         try rewind(to: h.position, "receiver reported an error")
                         continue stream
                     case .skip:
@@ -415,6 +436,7 @@ final class ZmodemSender {
                     link.log("Sent \(name)")
                     return .sent(data.count)
                 case .rpos:
+                    if isDuplicate(h.position) { continue }
                     try rewind(to: h.position, "ZRPOS after ZEOF")
                     continue stream
                 case .skip:

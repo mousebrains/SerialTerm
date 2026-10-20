@@ -215,6 +215,42 @@ struct ZmodemNativeTransferTests {
         try expectSame(files, in: dst)
     }
 
+    /// lrzsz's receiver repeats ZRPOS while it skips in-flight garbage. Each repeat must not
+    /// trigger another rewind, or the extra ZDATA headers break the resumed stream and errors
+    /// snowball (seen on CI as "Too many errors").
+    @Test func toleratesDuplicateZRPOS() throws {
+        let src = try tempDir(), dst = try tempDir()
+        let files = try makeFiles(in: src, sizes: [400_000])
+        var options = ZmodemOptions()
+        options.timeout = 1
+        let sender = ZmodemTransfer(kind: .zmodemSend(files), directory: dst, options: options)
+        let receiver = ZmodemTransfer(kind: .zmodemReceive, directory: dst, options: options)
+        let forward = Mangler(flipAt: [60_000, 150_000, 260_000])
+        sender.onOutput = { receiver.feed(forward.apply($0)) }
+        // Deliver every ZRPOS the receiver sends three times, like lrzsz does.
+        let zrposHex = Data("**\u{18}B09".utf8)
+        receiver.onOutput = { data in
+            sender.feed(data)
+            if data.range(of: zrposHex) != nil {
+                sender.feed(data)
+                sender.feed(data)
+            }
+        }
+        let logs = Inbox<String>()
+        sender.onLog = { logs.add($0) }
+        let results = Inbox<(Bool, String)>()
+        sender.onFinish = { results.add(($0, $1)) }
+        receiver.onFinish = { results.add(($0, $1)) }
+        try receiver.start()
+        try sender.start()
+        #expect(results.wait(timeout: 60) { $0.count == 2 })
+        #expect(results.all.allSatisfy { $0.0 }, "\(results.all)")
+        try expectSame(files, in: dst)
+        let rewinds = logs.all.filter { $0.hasPrefix("Resending ") }.count
+        #expect(rewinds <= 6, "3 faults should need about 3 rewinds, got \(rewinds)")
+        #expect(logs.all.contains { $0.contains("duplicate ZRPOS") })
+    }
+
     @Test func doesNotOverwriteExistingFiles() throws {
         let src = try tempDir(), dst = try tempDir()
         let files = try makeFiles(in: src, sizes: [500])
@@ -318,7 +354,8 @@ struct ZmodemDiagnosticsTests {
     @Test func traceRecordsErrorsAndRecovery() throws {
         var options = ZmodemOptions()
         options.timeout = 1
-        let (send, recv) = try traced([200_000], options: options, forward: Mangler(flipAt: [50_000]))
+        // 'A' fill keeps offsets predictable, so the flip always lands in plain payload.
+        let (send, recv) = try traced([200_000], options: options, forward: Mangler(flipAt: [50_000]), fill: 0x41)
         #expect(recv.contains("bad subpacket: CRC-32 mismatch"))
         #expect(recv.contains("TX ZRPOS hex  pos="))
         #expect(send.contains("RX ZRPOS hex  pos="))

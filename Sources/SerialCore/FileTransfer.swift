@@ -50,6 +50,8 @@ public protocol FileTransfer: AnyObject, Sendable {
     /// Blocks until at most `maxPending` bytes of output are still queued (0 = all of it has
     /// reached the serial driver). Back-pressure for senders.
     var waitForOutput: ((_ maxPending: Int) -> Void)? { get set }
+    /// Drops output queued but not yet sent (stale after a protocol rewind).
+    var discardOutput: (() -> Void)? { get set }
     /// Latest progress line.
     var onStatus: ((String) -> Void)? { get set }
     /// Notable events worth a line in the session log.
@@ -69,6 +71,7 @@ public final class ExternalTransfer: FileTransfer, @unchecked Sendable {
 
     public var onOutput: ((Data) -> Void)?
     public var waitForOutput: ((_ maxPending: Int) -> Void)?
+    public var discardOutput: (() -> Void)?
     /// Progress lines from the program's stderr.
     public var onStatus: ((String) -> Void)?
     public var onLog: ((String) -> Void)?
@@ -143,10 +146,20 @@ public final class ExternalTransfer: FileTransfer, @unchecked Sendable {
     }
 
     /// Abort: tell the remote to stop (8×CAN then backspaces, the standard ZMODEM abort) and end the program.
+    /// Delays at which the abort is repeated after a cancel. XMODEM/YMODEM receivers only notice
+    /// CAN at the start of a block, so a single abort sent mid-block is absorbed as bad data and
+    /// the remote keeps waiting; later copies arrive while it's between blocks.
+    public static var abortRepeats: [TimeInterval] = [1.5, 3.0]
+
     public func cancel() {
         cancelled = true
-        onOutput?(Data(repeating: 0x18, count: 8) + Data(repeating: 0x08, count: 8))
+        let abort = Data(repeating: 0x18, count: 8) + Data(repeating: 0x08, count: 8)
+        let output = onOutput
+        output?(abort)
         if process.isRunning { process.terminate() }
+        for delay in Self.abortRepeats {
+            DispatchQueue.global().asyncAfter(deadline: .now() + delay) { output?(abort) }
+        }
     }
 
     // MARK: - Command lines

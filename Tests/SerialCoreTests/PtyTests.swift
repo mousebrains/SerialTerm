@@ -151,6 +151,9 @@ struct ZmodemEndToEndTests {
             source.setEventHandler {
                 var buf = [UInt8](repeating: 0, count: 65_536)
                 let n = read(master, &buf, buf.count)
+                if let slow = ProcessInfo.processInfo.environment["SERIALTERM_TEST_SLOW_REMOTE_US"], let us = UInt32(slow) {
+                    usleep(us)  // simulate a slower machine (CI runners)
+                }
                 if n > 0 {
                     let d = Data(buf[0..<n])
                     try? stdinHandle.write(contentsOf: toRemoteMangler?.apply(d) ?? d)
@@ -222,6 +225,31 @@ struct ZmodemEndToEndTests {
         for f in files where (try Data(contentsOf: f)).count > 0 {
             #expect(try Data(contentsOf: dst.appendingPathComponent(f.lastPathComponent)) == Data(contentsOf: f))
         }
+    }
+
+    /// Cancelling an XMODEM send stops the remote receiver promptly. (Over a pty the receiver is
+    /// usually between blocks when the abort arrives, so this doesn't reproduce the mid-block case
+    /// that the repeated abort exists for; that was seen, and is checked, on real hardware.)
+    @Test func cancelStopsRemoteXmodemReceiver() throws {
+        let pty = try PtyPair()
+        let src = try tempDir(), dst = try tempDir()
+        let big = src.appendingPathComponent("big.bin")
+        try Data(repeating: 0x55, count: 5_000_000).write(to: big)
+        let session = Session(port: SerialPort(path: pty.slavePath, config: SerialConfig()), downloadDirectory: src)
+        let statuses = Inbox<String>()
+        session.onEvent = { if case let .transferStatus(s) = $0 { statuses.add(s) } }
+        try session.open()
+        defer { session.close() }
+
+        let remote = try runRemote(["lrx", "rx"], ["-b", "out.bin"], in: dst, pty: pty)
+        defer { remote.stop() }
+        try session.startTransfer(.xmodemSend(big))
+        #expect(statuses.wait(timeout: 10) { $0.count > 5 })  // well under way
+        session.cancelTransfer()
+
+        let deadline = Date().addingTimeInterval(8)
+        while remote.process.isRunning && Date() < deadline { usleep(50_000) }
+        #expect(!remote.process.isRunning, "remote rx still running after cancel")
     }
 
     @Test func recognisesLrzszXmodemAnnouncement() throws {
@@ -321,7 +349,13 @@ struct ZmodemEndToEndTests {
 
         let finished = events.wait(timeout: 120) { $0.contains { if case .transferFinished = $0 { true } else { false } } }
         #expect(finished)
-        for case let .transferFinished(success, message) in events.all { #expect(success, "\(message)") }
+        for case let .transferFinished(success, message) in events.all {
+            #expect(success, "\(message)")
+            if !success, let url = session.lastTraceURL, let trace = try? String(contentsOf: url, encoding: .utf8) {
+                // Make CI failures diagnosable from the log alone.
+                print("=== ZMODEM trace (\(direction)) ===\n" + trace.split(separator: "\n").suffix(150).joined(separator: "\n"))
+            }
+        }
         if !remoteSends { remote.process.waitUntilExit() }
         for f in files {
             #expect(try Data(contentsOf: dst.appendingPathComponent(f.lastPathComponent)) == Data(contentsOf: f))
