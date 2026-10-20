@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Pat Welch
+
 import Foundation
 
 /// A file transfer request. ZMODEM and YMODEM are batch protocols: a send may carry any
@@ -10,6 +13,14 @@ public enum TransferKind: Sendable, Equatable {
     /// XMODEM carries no file name, so the receiver has to choose one.
     case xmodemReceive(URL)
     case xmodemSend(URL)
+
+    /// XMODEM/YMODEM: block-at-a-time protocols whose receivers only notice CAN between blocks.
+    public var isBlockProtocol: Bool {
+        switch self {
+        case .zmodemReceive, .zmodemSend: return false
+        default: return true
+        }
+    }
 
     public var displayName: String {
         switch self {
@@ -88,10 +99,12 @@ public final class ExternalTransfer: FileTransfer, @unchecked Sendable {
     /// Directories searched for lrzsz before `PATH` (GUI apps get a minimal `PATH`).
     public static var toolSearchPaths = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]
 
-    public init(kind: TransferKind, workingDirectory: URL) throws {
+    /// - Parameter xmodem1K: send XMODEM with 1024-byte blocks (XMODEM-1K) instead of 128.
+    public init(kind: TransferKind, workingDirectory: URL, xmodem1K: Bool = false) throws {
         self.kind = kind
 
-        let (names, args, directory) = try Self.command(for: kind)
+        var (names, args, directory) = try Self.command(for: kind)
+        if xmodem1K, case .xmodemSend = kind { args.insert("-k", at: 0) }
         guard let tool = Self.findTool(names) else { throw TransferError.toolNotFound(names) }
 
         process.executableURL = tool
@@ -146,20 +159,13 @@ public final class ExternalTransfer: FileTransfer, @unchecked Sendable {
     }
 
     /// Abort: tell the remote to stop (8×CAN then backspaces, the standard ZMODEM abort) and end the program.
-    /// Delays at which the abort is repeated after a cancel. XMODEM/YMODEM receivers only notice
-    /// CAN at the start of a block, so a single abort sent mid-block is absorbed as bad data and
-    /// the remote keeps waiting; later copies arrive while it's between blocks.
-    public static var abortRepeats: [TimeInterval] = [1.5, 3.0]
+    /// The standard abort: CANs, then backspaces to erase them if a shell receives them.
+    public static let abortSequence = Data(repeating: 0x18, count: 8) + Data(repeating: 0x08, count: 8)
 
     public func cancel() {
         cancelled = true
-        let abort = Data(repeating: 0x18, count: 8) + Data(repeating: 0x08, count: 8)
-        let output = onOutput
-        output?(abort)
+        onOutput?(Self.abortSequence)
         if process.isRunning { process.terminate() }
-        for delay in Self.abortRepeats {
-            DispatchQueue.global().asyncAfter(deadline: .now() + delay) { output?(abort) }
-        }
     }
 
     // MARK: - Command lines

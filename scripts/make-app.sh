@@ -1,4 +1,5 @@
 #!/bin/zsh
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Build a release SerialTerm.app in ./build. Ad-hoc signed: fine for this Mac;
 # use a Developer ID identity and notarization to give it to others.
 set -euo pipefail

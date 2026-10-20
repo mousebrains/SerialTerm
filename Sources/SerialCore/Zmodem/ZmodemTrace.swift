@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Pat Welch
+
 import Foundation
 
 /// Tuning and diagnostics for the built-in ZMODEM. The defaults suit lrzsz-like peers;

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Pat Welch
+
 import Foundation
 
 /// Watches the incoming byte stream for the ZMODEM hex headers that start a transfer.

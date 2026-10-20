@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Pat Welch
+
 import Foundation
 
 /// Plumbing shared by the sender and receiver: output, tracing, progress, and logging.

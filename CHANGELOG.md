@@ -28,11 +28,20 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
   noisy), traces, performance, and opt-in tests against real hardware.
 - CI on GitHub Actions; tagged releases.
 
+- XMODEM-1K option (Settings ▸ Transfers): 1024-byte blocks, ~1.5× faster to the MicroRider.
+- Licensed GPL-3.0-or-later.
+
 ### Fixed
 - XMODEM receive failed with lrzsz's "Security Violation" (it refuses paths with directories);
   `lrx` now runs in the target folder.
+- Cancelling an XMODEM/YMODEM transfer mid-block could leave the remote receiver running (it
+  only sees CAN between blocks). SerialTerm now aborts again if the receiver NAKs after a cancel.
+- ZMODEM sender: duplicate `ZRPOS` requests (lrzsz repeats them while skipping in-flight data)
+  caused cascading rewinds and "Too many errors". Repeats are now ignored, and stale queued
+  output is discarded on a rewind.
 
 ### Verified on hardware
 - Rockland MicroRider (native USB serial): ZMODEM in both directions, single files and batches,
   up to 134.6 MB, all MD5-verified. ~9.6 MB/s receiving; sending is limited by the device to
-  ~2.3 MB/s. XMODEM and YMODEM (two-file batches) in both directions, MD5-verified.
+  ~2.3 MB/s. XMODEM and YMODEM (two-file batches) in both directions, MD5-verified; XMODEM to the
+  MicroRider ~260 KB/s, XMODEM-1K ~390 KB/s.

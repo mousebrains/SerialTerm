@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Pat Welch
+
 import Foundation
 
 public enum SessionEvent: Sendable {
@@ -27,6 +30,9 @@ public final class Session: @unchecked Sendable {
     /// Run ZMODEM through lrzsz instead of the built-in implementation.
     public var useExternalZmodem = false
     public var zmodemOptions = ZmodemOptions()
+    /// Send XMODEM with 1024-byte blocks. Far fewer round trips; most receivers (lrzsz's included)
+    /// accept it, but some older ones only take 128-byte blocks.
+    public var xmodem1K = false
     /// Where ZMODEM protocol traces go (one file per transfer).
     public var traceDirectory: URL?
     /// The most recent ZMODEM trace file.
@@ -42,6 +48,11 @@ public final class Session: @unchecked Sendable {
     private static let xmodemPrompt = Array("Give your local XMODEM receive command now.".utf8)
     private static let ymodemPrompt = Array("Give your local YMODEM receive command now.".utf8)
     private var transfer: FileTransfer?
+    /// After cancelling an XMODEM/YMODEM transfer: until when to watch for a remote receiver that
+    /// missed the abort, and how many more aborts may be sent.
+    private var cancelWatchUntil: Date?
+    private var cancelRetries = 0
+    private static let nak: UInt8 = 0x15
 
     public init(port: SerialPort, downloadDirectory: URL) {
         self.port = port
@@ -120,7 +131,7 @@ public final class Session: @unchecked Sendable {
                 t = z
             }
         default:
-            t = try ExternalTransfer(kind: kind, workingDirectory: downloadDirectory)
+            t = try ExternalTransfer(kind: kind, workingDirectory: downloadDirectory, xmodem1K: xmodem1K)
         }
         let logger: SessionLogger? = try lock.withLock {
             guard transfer == nil else { throw TransferInProgress() }
@@ -163,7 +174,16 @@ public final class Session: @unchecked Sendable {
     }
 
     public func cancelTransfer() {
-        lock.withLock { transfer }?.cancel()
+        let active: FileTransfer? = lock.withLock {
+            if let t = transfer as? ExternalTransfer, t.kind.isBlockProtocol {
+                // X/YMODEM receivers only see CAN at a block boundary; one that got the abort
+                // mid-block treats it as a bad block and NAKs. Watch for that and abort again.
+                cancelWatchUntil = Date().addingTimeInterval(15)
+                cancelRetries = 4
+            }
+            return transfer
+        }
+        active?.cancel()
     }
 
     /// Tell a waiting remote `rz` to give up.
@@ -186,6 +206,7 @@ public final class Session: @unchecked Sendable {
         }
 
         logger?.log(.rx, data)
+        abortAgainIfRemoteStillReceiving(data)
 
         guard auto, let match = lock.withLock({ detector.scan(data) }) else {
             onDisplay?(data)
@@ -212,6 +233,26 @@ public final class Session: @unchecked Sendable {
             }
         case .remoteReceiving:
             onEvent?(.remoteWaitingForFiles)
+        }
+    }
+
+    /// A NAK after a cancel means the remote's XMODEM/YMODEM receiver missed the abort (it arrived
+    /// mid-block) and is waiting for a resend; this time the abort lands at a block boundary.
+    /// Blind repeats are worse: if the first abort worked, CANs reaching the shell disturb it.
+    private func abortAgainIfRemoteStillReceiving(_ data: Data) {
+        let again: Bool = lock.withLock {
+            guard let until = cancelWatchUntil else { return false }
+            guard Date() < until, cancelRetries > 0 else {
+                cancelWatchUntil = nil
+                return false
+            }
+            guard data.contains(Self.nak) else { return false }
+            cancelRetries -= 1
+            return true
+        }
+        if again {
+            lock.withLock { logger }?.note("Remote still receiving after cancel (NAK); aborting again")
+            port.write(ExternalTransfer.abortSequence)
         }
     }
 

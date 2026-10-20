@@ -16,7 +16,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Select newest Xcode
         run: |
@@ -51,7 +51,7 @@ jobs:
     needs: test
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Select newest Xcode
         run: |
@@ -70,7 +70,7 @@ jobs:
       - name: Zip
         run: ditto -c -k --keepParent build/SerialTerm.app build/SerialTerm.zip
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: SerialTerm-${{ github.sha }}
           path: build/SerialTerm.zip

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Pat Welch
+
 import Foundation
 
 /// Built-in ZMODEM. The protocol runs on its own thread, reading what `feed` delivers

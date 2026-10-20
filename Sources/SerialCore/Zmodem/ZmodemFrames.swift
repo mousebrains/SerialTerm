@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Pat Welch
+
 import Foundation
 
 /// Wire constants and headers for ZMODEM (Chuck Forsberg's 1988 specification, as

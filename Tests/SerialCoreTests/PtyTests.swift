@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Pat Welch
+
 import Darwin
 import Foundation
 import Testing
@@ -250,6 +253,36 @@ struct ZmodemEndToEndTests {
         let deadline = Date().addingTimeInterval(8)
         while remote.process.isRunning && Date() < deadline { usleep(50_000) }
         #expect(!remote.process.isRunning, "remote rx still running after cancel")
+    }
+
+    /// If the remote receiver NAKs after a cancel, it missed the abort; SerialTerm aborts again.
+    /// Without a NAK nothing more is sent (extra CANs would disturb a shell that already returned).
+    @Test func abortsAgainOnlyIfRemoteNaksAfterCancel() throws {
+        let pty = try PtyPair()
+        let src = try tempDir()
+        let file = src.appendingPathComponent("f.bin")
+        try Data(repeating: 1, count: 5000).write(to: file)
+        let session = Session(port: SerialPort(path: pty.slavePath, config: SerialConfig()), downloadDirectory: src)
+        let events = Inbox<SessionEvent>()
+        session.onEvent = { events.add($0) }
+        try session.open()
+        defer { session.close() }
+
+        try session.startTransfer(.xmodemSend(file))  // lsx waits for the receiver's NAK/C
+        usleep(300_000)
+        session.cancelTransfer()
+        #expect(events.wait(timeout: 10) { $0.contains { if case .transferFinished = $0 { true } else { false } } })
+        let abort = ExternalTransfer.abortSequence
+        let first = pty.readFromPort(timeout: 1)
+        #expect(first.range(of: abort) != nil, "cancel sends the abort")
+
+        // Quiet line: no further aborts.
+        #expect(pty.readFromPort(timeout: 1).isEmpty)
+
+        // The receiver is still there and NAKs: abort again.
+        pty.writeToPort(Data([0x15]))
+        let second = pty.readFromPort(timeout: 2)
+        #expect(second.range(of: abort) != nil, "a NAK after cancel triggers another abort")
     }
 
     @Test func recognisesLrzszXmodemAnnouncement() throws {

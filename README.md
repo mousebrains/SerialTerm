@@ -1,6 +1,6 @@
 # SerialTerm
 
-[![CI](https://github.com/mousebrains/SerialTerm/actions/workflows/ci.yml/badge.svg)](https://github.com/mousebrains/SerialTerm/actions/workflows/ci.yml)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE) [![CI](https://github.com/mousebrains/SerialTerm/actions/workflows/ci.yml/badge.svg)](https://github.com/mousebrains/SerialTerm/actions/workflows/ci.yml)
 
 A macOS serial terminal for instruments and embedded devices on USB-serial adapters (FTDI,
 SiLabs, WCH, Prolific, and native USB CDC devices). It has built-in ZMODEM that starts automatically,
@@ -80,3 +80,12 @@ XMODEM and YMODEM (via lrzsz) are also verified on the MicroRider in both direct
 
 Next: native XMODEM/YMODEM; testing with a TWR Slocum glider. See the [Changelog](CHANGELOG.md) for
 details.
+
+## License
+
+Copyright © 2026 Pat Welch. SerialTerm is free software, licensed under the
+[GNU General Public License v3.0 or later](LICENSE).
+
+It uses [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) (MIT). For XMODEM/YMODEM it runs
+[lrzsz](https://ohse.de/uwe/software/lrzsz.html) (GPL) as a separate program if you've installed
+it; lrzsz is not included.

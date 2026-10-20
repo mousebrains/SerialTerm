@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Pat Welch
+
 import Combine
 import Foundation
 import SerialCore
@@ -19,6 +22,7 @@ struct Preferences: Codable, Equatable {
     var autoZmodem = true
     var useLrzszForZmodem = false
     var zmodem = ZmodemOptions()
+    var xmodem1K = false
     var autoReconnect = true
     var loggingEnabled = false
     var logDirectory = Preferences.documentsSubfolder("SerialTerm Logs")
@@ -41,6 +45,7 @@ struct Preferences: Codable, Equatable {
         autoZmodem = (try? c.decode(Bool.self, forKey: .autoZmodem)) ?? d.autoZmodem
         useLrzszForZmodem = (try? c.decode(Bool.self, forKey: .useLrzszForZmodem)) ?? d.useLrzszForZmodem
         zmodem = (try? c.decode(ZmodemOptions.self, forKey: .zmodem)) ?? d.zmodem
+        xmodem1K = (try? c.decode(Bool.self, forKey: .xmodem1K)) ?? d.xmodem1K
         autoReconnect = (try? c.decode(Bool.self, forKey: .autoReconnect)) ?? d.autoReconnect
         loggingEnabled = (try? c.decode(Bool.self, forKey: .loggingEnabled)) ?? d.loggingEnabled
         logDirectory = (try? c.decode(URL.self, forKey: .logDirectory)) ?? d.logDirectory

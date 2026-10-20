@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Pat Welch
+
 import SerialCore
 import SwiftUI
 
@@ -332,7 +335,11 @@ struct SettingsWindow: View {
                         .foregroundStyle(.secondary)
                 }
                 Section {
-                    Text("YMODEM and XMODEM currently use lrzsz (brew install lrzsz).")
+                    Toggle("XMODEM: send 1K blocks (XMODEM-1K)", isOn: $settings.prefs.xmodem1K)
+                } header: {
+                    Text("XMODEM / YMODEM")
+                } footer: {
+                    Text("These use lrzsz (brew install lrzsz). 1K blocks are much faster on links with delay; turn this off if a device only accepts classic 128-byte XMODEM.")
                         .foregroundStyle(.secondary)
                 }
             }

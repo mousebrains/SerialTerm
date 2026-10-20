@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Pat Welch
+
 import Foundation
 import Testing
 @testable import SerialCore
@@ -297,6 +300,30 @@ struct HardwareXmodemTests {
         print("PROBE CANCEL: shell answered after \(String(format: "%.1f", Date().timeIntervalSince(cancelled))) s: \(answer.contains("ALIVE42"))")
         #expect(answer.contains("ALIVE42"))
         _ = rig.shell("rm -f cancel.bin", wait: 0.5)
+    }
+    /// XMODEM send speed to the device with 128- and 1024-byte blocks.
+    @Test func xmodem1KSpeed() throws {
+        let dir = try tempDir()
+        let file = dir.appendingPathComponent("speed.bin")
+        var rng = SystemRandomNumberGenerator()
+        let content = Data((0..<512_000).map { _ in UInt8.random(in: 0...255, using: &rng) })
+        try content.write(to: file)
+        for oneK in [false, true] {
+            let rig = try Rig(downloads: dir)
+            defer { rig.session.close() }
+            rig.session.xmodem1K = oneK
+            _ = rig.shell("rm -f speed.bin", wait: 0.5)
+            let start = Date()
+            try rig.session.startTransfer(.xmodemSend(file), startRemote: true)
+            let (ok, msg, _) = rig.waitForFinish(300)
+            let seconds = Date().timeIntervalSince(start)
+            Thread.sleep(forTimeInterval: 1)
+            let remote = rig.shell("head -c 512000 speed.bin | md5sum", wait: 1)
+            print("PROBE XMODEM\(oneK ? "-1K" : "    "): \(ok) \(msg) \(String(format: "%.1f", seconds)) s = \(Int(Double(content.count) / seconds)) B/s; md5 match \(remote.contains(Insecure_md5(content)))")
+        }
+        let rig = try Rig(downloads: dir)
+        _ = rig.shell("rm -f speed.bin", wait: 0.5)
+        rig.session.close()
     }
 }
 

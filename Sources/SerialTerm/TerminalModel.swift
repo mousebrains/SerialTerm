@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Pat Welch
+
 import AppKit
 import Combine
 import SerialCore
@@ -77,6 +80,7 @@ final class TerminalModel: ObservableObject {
         session.autoZmodem = prefs.autoZmodem
         session.useExternalZmodem = prefs.useLrzszForZmodem
         session.zmodemOptions = prefs.zmodem
+        session.xmodem1K = prefs.xmodem1K
         session.traceDirectory = prefs.logDirectory
         session.onDisplay = { [display] data in display.append(data) }
         session.onEvent = { [weak self] event in
@@ -362,6 +366,7 @@ final class TerminalModel: ObservableObject {
             session.autoZmodem = new.autoZmodem
             session.useExternalZmodem = new.useLrzszForZmodem
             session.zmodemOptions = new.zmodem
+            session.xmodem1K = new.xmodem1K
             session.traceDirectory = new.logDirectory
             session.downloadDirectory = new.downloadDirectory
             if new.loggingEnabled != old.loggingEnabled || new.logDirectory != old.logDirectory {

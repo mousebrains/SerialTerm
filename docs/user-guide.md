@@ -174,7 +174,16 @@ to ZMODEM, which SerialTerm then receives automatically. So running `sb` and doi
 gets your files.
 
 XMODEM sends neither a file name nor a size, so you choose the name, and the file arrives padded
-with 0x1A bytes to a multiple of 128. YMODEM sends both, so its files arrive exact.
+with 0x1A bytes to a multiple of 128. YMODEM sends both, so its files arrive exact. To strip the
+padding from a text file: `perl -pi -e 's/\x1a+$//' file`.
+
+**XMODEM-1K** (Settings ▸ Transfers) sends 1024-byte blocks instead of 128, which is fewer round
+trips and was about 1.5× faster to a MicroRider. Leave it off for devices that only accept classic
+XMODEM.
+
+**Cancelling** stops both ends. An XMODEM/YMODEM receiver only notices a cancel between blocks.
+If the device's receiver keeps waiting (it sends a NAK), SerialTerm cancels again. If the device
+still seems stuck, press Ctrl-X a few times, then Return.
 
 ## Troubleshooting
 
