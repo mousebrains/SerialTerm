@@ -1,6 +1,6 @@
 # SerialTerm
 
-[![CI](https://github.com/mousebrains/SerialTerminal/actions/workflows/ci.yml/badge.svg)](https://github.com/mousebrains/SerialTerminal/actions/workflows/ci.yml)
+[![CI](https://github.com/mousebrains/SerialTerm/actions/workflows/ci.yml/badge.svg)](https://github.com/mousebrains/SerialTerm/actions/workflows/ci.yml)
 
 A macOS serial terminal for instruments and embedded devices on USB-serial adapters (FTDI,
 SiLabs, WCH, Prolific, and native USB CDC devices). It has built-in ZMODEM that starts automatically,
@@ -34,13 +34,13 @@ detailed protocol diagnostics, and millisecond-timestamped session logs.
 
 Requires macOS 14 (Sonoma) or later.
 
-- **Download**: get `SerialTerm.zip` from [Releases](https://github.com/mousebrains/SerialTerminal/releases).
+- **Download**: get `SerialTerm.zip` from [Releases](https://github.com/mousebrains/SerialTerm/releases).
   The app is not notarized, so the first time you open it, right-click it and choose **Open**.
 - **Build from source** (requires Xcode 26 or later):
 
   ```sh
-  git clone git@github.com:mousebrains/SerialTerminal.git
-  cd SerialTerminal
+  git clone git@github.com:mousebrains/SerialTerm.git
+  cd SerialTerm
   ./scripts/make-app.sh          # → build/SerialTerm.app
   ```
 

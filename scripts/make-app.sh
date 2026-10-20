@@ -28,7 +28,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <dict>
     <key>CFBundleName</key><string>SerialTerm</string>
     <key>CFBundleDisplayName</key><string>SerialTerm</string>
-    <key>CFBundleIdentifier</key><string>com.example.SerialTerm</string>
+    <key>CFBundleIdentifier</key><string>com.mousebrains.SerialTerminal</string>
     <key>CFBundleExecutable</key><string>SerialTerm</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>${VERSION}</string>

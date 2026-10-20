@@ -61,9 +61,15 @@ final class AppSettings: ObservableObject {
 
     private static let key = "preferences.v2"
 
+    /// Settings saved before the bundle identifier changed.
+    private static let previousDomains = ["com.example.SerialTerm"]
+
     private init() {
-        if let data = UserDefaults.standard.data(forKey: Self.key),
-           let prefs = try? JSONDecoder().decode(Preferences.self, from: data) {
+        var data = UserDefaults.standard.data(forKey: Self.key)
+        if data == nil {
+            data = Self.previousDomains.lazy.compactMap { UserDefaults(suiteName: $0)?.data(forKey: Self.key) }.first
+        }
+        if let data, let prefs = try? JSONDecoder().decode(Preferences.self, from: data) {
             self.prefs = prefs
         } else {
             prefs = Preferences()

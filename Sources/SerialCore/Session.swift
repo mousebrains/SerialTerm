@@ -107,10 +107,6 @@ public final class Session: @unchecked Sendable {
     /// - Parameter startRemote: first type the remote's receive command (`rb`, `rx name`) for
     ///   protocols whose sender doesn't start the receiver itself.
     public func startTransfer(_ kind: TransferKind, primed: Data? = nil, startRemote: Bool = false) throws {
-        if startRemote, let command = ExternalTransfer.remoteReceiveCommand(for: kind) {
-            lock.withLock { logger }?.log(.tx, Data(command.utf8))
-            port.write(Data(command.utf8))
-        }
         let t: FileTransfer
         switch kind {
         case .zmodemReceive, .zmodemSend:
@@ -150,6 +146,11 @@ public final class Session: @unchecked Sendable {
             self.onEvent?(.transferFinished(success: success, message: message))
         }
 
+        // Only once the transfer is certain to start: type the remote's receive command if asked.
+        if startRemote, let command = ExternalTransfer.remoteReceiveCommand(for: kind) {
+            logger?.log(.tx, Data(command.utf8))
+            port.write(Data(command.utf8))
+        }
         logger?.note("\(kind.displayName) started (transfer data not logged)")
         onEvent?(.transferStarted(kind.displayName))
         do {
