@@ -3,7 +3,7 @@
 ## Requirements
 
 - macOS 14 or later
-- Xcode 16 or later (Swift 6 toolchain; the package uses Swift 5 language mode)
+- Xcode 26 or later (Swift 6.2 toolchain, required by SwiftTerm; the package uses Swift 5 language mode)
 - `brew install lrzsz` (for the interop tests and for XMODEM/YMODEM)
 
 If `xcode-select -p` points at the Command Line Tools, either run
