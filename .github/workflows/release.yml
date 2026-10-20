@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install lrzsz
+        run: brew install lrzsz
+
+      - name: Test
+        run: swift test
+
+      - name: Build SerialTerm.app
+        env:
+          VERSION: ${{ github.ref_name }}
+          BUILD: ${{ github.run_number }}
+        run: |
+          export VERSION="${VERSION#v}"
+          ./scripts/make-app.sh
+
+      - name: Package
+        run: |
+          ditto -c -k --keepParent build/SerialTerm.app build/SerialTerm.zip
+          shasum -a 256 build/SerialTerm.zip | tee build/SerialTerm.zip.sha256
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" build/SerialTerm.zip build/SerialTerm.zip.sha256 \
+            --title "SerialTerm ${{ github.ref_name }}" \
+            --notes "Ad-hoc signed, not notarized: right-click ▸ Open the first time. See CHANGELOG.md for changes." \
+            --verify-tag

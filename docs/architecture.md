@@ -1,0 +1,135 @@
+# Architecture
+
+SerialTerm is a Swift package with two targets:
+
+| Target | Depends on | Contents |
+|---|---|---|
+| `SerialCore` (library) | Foundation only | Serial I/O, session routing, logging, file transfer (native ZMODEM, lrzsz runner) |
+| `SerialTerm` (macOS app) | SerialCore, SwiftUI/AppKit, IOKit, [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) | Windows, settings, port discovery, terminal display |
+
+`SerialCore` doesn't use AppKit or SwiftUI, so it can be tested without a UI and, eventually,
+ported to Linux. That would mainly need a Linux path for non-standard baud rates
+(`termios2`/`BOTHER`).
+
+## Source map
+
+```
+Sources/SerialCore/
+  SerialConfig.swift       line settings (baud, data bits, parity, stop bits, flow control)
+  SerialPort.swift         open/configure (termios + IOSSIOSPEED), reads via DispatchSource, write queue
+  Session.swift            one connection: routes input to display / log / transfer; ZMODEM auto-start
+  SessionLogger.swift      millisecond-timestamped session log
+  ZmodemDetector.swift     finds ZRQINIT/ZRINIT in the incoming stream (split-safe)
+  FileTransfer.swift       FileTransfer protocol; TransferKind; ExternalTransfer (lrzsz)
+  Zmodem/
+    ZmodemFrames.swift     constants, ZHeader, CRC-16/32, ZEncoder (escaping, headers, subpackets)
+    ZmodemReader.swift     ByteChannel (blocking inbox), ZReader (header/subpacket decoder)
+    ZmodemSender.swift     ZLink (output batching, tracing, progress), ZmodemSender
+    ZmodemReceiver.swift   ZmodemReceiver, file-offer parsing, safe file names
+    ZmodemTransfer.swift   FileTransfer adapter: runs sender/receiver on its own thread
+    ZmodemTrace.swift      ZmodemOptions; trace writer; header descriptions
+Sources/SerialTerm/
+  SerialTermApp.swift      @main, Settings scene, app delegate
+  ContentView.swift        toolbar, connect bar, status bar, settings views
+  TerminalModel.swift      per-window state and actions; DisplayBuffer
+  TerminalContainer.swift  SwiftTerm hosting, keyboard input, file drops
+  PortScanner.swift        IOKit enumeration and hot-plug notifications
+  Preferences.swift        ConnectionSettings (per window), Preferences + AppSettings (app-wide)
+```
+
+## Data flow
+
+```
+                 ┌────────────── SerialPort ──────────────┐
+  device ◀──────▶│ write queue (ordered, bounded backlog)  │
+                 │ read DispatchSource (64 KB reads)       │
+                 └───────┬─────────────────────▲───────────┘
+                         │ onData (read queue)  │ write()
+                         ▼                      │
+                 ┌──────────── Session ──────────────────────┐
+                 │ transfer active? ──yes──▶ FileTransfer.feed│──▶ protocol thread
+                 │      │no                                  │      │ onOutput
+                 │      ├──▶ SessionLogger (RX)              │◀─────┘
+                 │      ├──▶ ZmodemDetector ──▶ start transfer│
+                 │      └──▶ onDisplay                       │
+                 └──────┬─────────────────────▲──────────────┘
+                        │                     │ sendFromUser (TX, logged)
+                        ▼                     │
+              DisplayBuffer (batches to main) │
+                        ▼                     │
+              SwiftTerm TerminalView ── keystrokes ──▶ TerminalModel
+```
+
+## Threads
+
+| Thread / queue | Work |
+|---|---|
+| Main | UI, `TerminalModel`, feeding SwiftTerm, file pickers |
+| `SerialPort.read` | Reads the port; `Session` routing; logging; ZMODEM detection |
+| `SerialPort.write` | Writes in order; waits on `poll(POLLOUT)` when the driver is full |
+| `ZMODEM` (one `Thread` per transfer) | Runs the sender or receiver as blocking, sequential code |
+| `SessionLogger`, `ZmodemTrace` | Serial queues for file writes |
+| lrzsz pipes | `FileHandle` readability handlers (lrzsz transfers only) |
+
+**Display batching**: at 2–3 Mbaud, input arrives in thousands of small reads per second.
+`DisplayBuffer` collects them and schedules at most one main-thread update at a time, so the
+display can't flood the main queue.
+
+**The transfer thread model**: ZMODEM is written as straightforward blocking code, like lrzsz,
+rather than as a callback state machine. `ByteChannel` turns the serial input into a blocking
+read with a timeout (an `NSCondition`). `ZReader` adds a local buffer, one byte of push-back, and
+a history used for error snapshots. Cancelling wakes the reader, which then throws.
+
+**Back-pressure**: senders call `waitForOutput(maxPending:)`. `SerialPort` counts bytes queued but
+not yet accepted by the driver, so a sender can keep the driver busy (a 64 KB backlog) without
+queuing an unbounded amount, and a `ZRPOS` rewind wastes little.
+
+## Session routing
+
+`Session.handleIncoming` runs on the read queue:
+
+1. If a transfer is active, all bytes go to it. They are not displayed or logged; the transfer
+   logs its own events.
+2. Otherwise the bytes are logged as `RX`, then scanned by `ZmodemDetector`:
+   - `ZRQINIT` → display the bytes before the header, then start a ZMODEM receive with the header
+     bytes passed on (`prime`), so the receiver parses and traces the remote's opening frame;
+   - `ZRINIT` → emit `.remoteWaitingForFiles`; the UI shows a file picker;
+   - nothing → display.
+
+User input (`sendFromUser`) is dropped while a transfer runs.
+
+## File transfers
+
+```swift
+public protocol FileTransfer: AnyObject, Sendable {
+    var onOutput: ((Data) -> Void)? { get set }                    // bytes for the line
+    var waitForOutput: ((_ maxPending: Int) -> Void)? { get set }  // back-pressure
+    var onStatus: ((String) -> Void)? { get set }                  // progress line
+    var onLog: ((String) -> Void)? { get set }                     // session-log notes
+    var onFinish: ((Bool, String) -> Void)? { get set }
+    func start() throws
+    func feed(_ data: Data)
+    func cancel()
+}
+```
+
+- `ZmodemTransfer`: the native implementation (see [ZMODEM](zmodem.md)).
+- `ExternalTransfer`: runs `lrz`/`lsz`/`lrb`/`lsb`/`lrx`/`lsx` with their standard input and
+  output piped to the serial line. It searches `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`,
+  then `PATH`.
+
+## Port discovery
+
+`PortScanner` lists `IOSerialBSDClient` services and reports each one's callout device
+(`/dev/cu.*`). It searches up the IOKit registry for USB vendor and product names, the serial
+number, and VID/PID. `IOServiceAddMatchingNotification` (first-match and terminated) keeps the list
+current. When an adapter returns after an unexpected unplug, `TerminalModel` matches it by USB
+serial number and reconnects.
+
+## Settings
+
+- `ConnectionSettings` (port, its USB serial number, `SerialConfig`) belongs to a window. The most
+  recent one is stored as the default for new windows.
+- `Preferences` (keyboard, display, folders, transfer options, `ZmodemOptions`) is app-wide. It is
+  held by `AppSettings.shared` and saved to `UserDefaults` as JSON under `preferences.v2`.
+  Decoding goes field by field, so adding settings never discards saved ones.

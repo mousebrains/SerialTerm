@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build & test
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Install lrzsz (interop tests, XMODEM/YMODEM)
+        run: brew install lrzsz
+
+      - name: Cache Swift packages
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: spm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
+          restore-keys: spm-${{ runner.os }}-
+
+      - name: Build
+        run: swift build
+
+      - name: Test
+        run: swift test
+
+      - name: Performance tests (release)
+        run: swift test -c release --filter ZmodemPerformanceTests
+
+  app:
+    name: App bundle
+    runs-on: macos-15
+    needs: test
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build SerialTerm.app
+        env:
+          VERSION: 0.0.0-ci.${{ github.run_number }}
+          BUILD: ${{ github.run_number }}
+        run: ./scripts/make-app.sh
+
+      - name: Zip
+        run: ditto -c -k --keepParent build/SerialTerm.app build/SerialTerm.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SerialTerm-${{ github.sha }}
+          path: build/SerialTerm.zip
+          retention-days: 14
