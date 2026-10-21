@@ -15,6 +15,9 @@ public final class ZmodemTransfer: FileTransfer, @unchecked Sendable {
     public var onFinish: ((_ success: Bool, _ message: String) -> Void)?
 
     public let options: ZmodemOptions
+    /// Typed (with CR) before a send starts, to start the remote's receiver from its prompt:
+    /// "rz" for lrzsz, "zr" for Slocum gliders, "" for none.
+    public let receiveCommand: String
     /// Protocol trace for this transfer, if tracing is on.
     public let trace: ZmodemTrace?
 
@@ -22,10 +25,12 @@ public final class ZmodemTransfer: FileTransfer, @unchecked Sendable {
     private let channel = ByteChannel()
 
     /// - Parameter traceURL: where to write the protocol trace (ignored if `options.traceLevel` is off).
-    public init(kind: TransferKind, directory: URL, options: ZmodemOptions = ZmodemOptions(), traceURL: URL? = nil) {
+    public init(kind: TransferKind, directory: URL, options: ZmodemOptions = ZmodemOptions(), traceURL: URL? = nil,
+                receiveCommand: String = "rz") {
         self.kind = kind
         self.directory = directory
         self.options = options
+        self.receiveCommand = receiveCommand
         if options.traceLevel != .off, let traceURL {
             trace = try? ZmodemTrace(url: traceURL, level: options.traceLevel)
         } else {
@@ -89,7 +94,7 @@ public final class ZmodemTransfer: FileTransfer, @unchecked Sendable {
                     ? "No files received"
                     : "Received \(Self.files(r.received.count)) (\(ZLink.size(r.bytes)))"
             case let .zmodemSend(files):
-                let r = try ZmodemSender(link: link, options: options).run(files: files)
+                let r = try ZmodemSender(link: link, options: options, receiveCommand: receiveCommand).run(files: files)
                 message = "Sent \(Self.files(r.sent.count)) (\(ZLink.size(r.bytes)))"
                     + (r.skipped.isEmpty ? "" : ", \(r.skipped.count) skipped by receiver")
             default:

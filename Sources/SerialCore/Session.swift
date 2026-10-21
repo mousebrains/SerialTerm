@@ -42,6 +42,8 @@ public final class Session: @unchecked Sendable {
     public private(set) var lastTraceURL: URL?
     /// Where received files are saved.
     public var downloadDirectory: URL
+    /// Typed before a built-in ZMODEM send to start the remote's receiver: "rz", "zr" (Slocum), or "".
+    public var zmodemReceiveCommand = "rz"
     /// Rate limit for typed and pasted text. File transfers are never paced.
     public var pacing: Pacing {
         get { pacer.pacing }
@@ -151,7 +153,8 @@ public final class Session: @unchecked Sendable {
                 t = try ExternalTransfer(kind: kind, workingDirectory: downloadDirectory)
             } else {
                 let traceURL = traceDirectory?.appendingPathComponent(ZmodemTrace.defaultFileName())
-                let z = ZmodemTransfer(kind: kind, directory: downloadDirectory, options: zmodemOptions, traceURL: traceURL)
+                let z = ZmodemTransfer(kind: kind, directory: downloadDirectory, options: zmodemOptions, traceURL: traceURL,
+                                       receiveCommand: zmodemReceiveCommand)
                 if let primed { z.prime(primed) }
                 lastTraceURL = z.trace?.url ?? lastTraceURL
                 t = z

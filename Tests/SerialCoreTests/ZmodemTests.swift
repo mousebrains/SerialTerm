@@ -435,6 +435,27 @@ struct ZmodemNativeTransferTests {
         }
     }
 
+    @Test(arguments: ["rz", "zr", ""])
+    func senderTypesTheReceiveCommand(command: String) throws {
+        let src = try tempDir(), dst = try tempDir()
+        let files = try makeFiles(in: src, sizes: [100])
+        let sender = ZmodemTransfer(kind: .zmodemSend(files), directory: dst, receiveCommand: command)
+        let receiver = ZmodemTransfer(kind: .zmodemReceive, directory: dst)
+        let sent = Inbox<Data>()
+        sender.onOutput = { sent.add($0); receiver.feed($0) }
+        receiver.onOutput = { sender.feed($0) }
+        let results = Inbox<Bool>()
+        sender.onFinish = { ok, _ in results.add(ok) }
+        receiver.onFinish = { ok, _ in results.add(ok) }
+        try receiver.start()
+        try sender.start()
+        #expect(results.wait(timeout: 10) { $0.count == 2 })
+        #expect(results.all.allSatisfy { $0 })  // the receiver skips the command as noise
+        let start = sent.all.reduce(Data(), +).prefix(5)
+        let expected = command.isEmpty ? Data("**".utf8) : Data((command + "\r").utf8)
+        #expect(start.starts(with: expected), "began \(Array(start))")
+    }
+
     @Test func timeLeftAppearsOnASlowLink() throws {
         let src = try tempDir(), dst = try tempDir()
         let files = try makeFiles(in: src, sizes: [150_000, 150_000, 150_000])

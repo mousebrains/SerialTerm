@@ -12,6 +12,8 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
   stop bits, RTS/CTS and XON/XOFF flow control; changes apply immediately.
 - Choosing a port connects; typing at a disconnected terminal connects first; a connect bar and
   local `[Connected …]` / `[Disconnected]` lines.
+- The command typed to start the device's ZMODEM receiver before a send is set per window and
+  saved in presets: `rz` (default), `zr` for Slocum gliders, or nothing.
 - ZMODEM progress shows the batch position (`3/10`), the percentage of the whole batch, and an
   estimate of the time left from the measured data rate and gap between files.
 - Paced typing: typed and pasted text limited to N characters a second, optionally waiting for

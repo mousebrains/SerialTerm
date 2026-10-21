@@ -85,7 +85,8 @@ struct ContentView: View {
             .popover(isPresented: $popovers.showLineSettings, arrowEdge: .bottom) {
                 LineSettingsView(config: $model.connection.config,
                                  backspaceSendsControlH: $model.connection.backspaceSendsControlH,
-                                 pacing: $model.connection.pacing)
+                                 pacing: $model.connection.pacing,
+                                 zmodemReceiveCommand: $model.connection.zmodemReceiveCommand)
             }
         }
     }
@@ -326,6 +327,7 @@ struct LineSettingsView: View {
     @Binding var config: SerialConfig
     @Binding var backspaceSendsControlH: Bool
     @Binding var pacing: Pacing
+    @Binding var zmodemReceiveCommand: String
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 0) {
@@ -374,6 +376,19 @@ struct LineSettingsView: View {
                     }
                 } footer: {
                     Text("For devices whose command line drops characters sent too fast. Applies to typed and pasted text; file transfers always run at full speed. Waiting for the echo goes as fast as the device keeps up; the speed limit and line pause still apply after each echo.")
+                        .foregroundStyle(.secondary)
+                }
+                Section {
+                    Picker("ZMODEM send starts receiver with", selection: $zmodemReceiveCommand) {
+                        Text("rz (Linux, lrzsz)").tag("rz")
+                        Text("zr (Slocum glider)").tag("zr")
+                        if !["rz", "zr", ""].contains(zmodemReceiveCommand) {
+                            Text(zmodemReceiveCommand).tag(zmodemReceiveCommand)
+                        }
+                        Text("Nothing (start it yourself)").tag("")
+                    }
+                } footer: {
+                    Text("Typed at the device's prompt when you send files by ZMODEM. Harmless if the receiver is already running.")
                         .foregroundStyle(.secondary)
                 }
             }

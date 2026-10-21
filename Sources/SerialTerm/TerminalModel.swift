@@ -87,6 +87,7 @@ final class TerminalModel: ObservableObject {
         session.xmodem1K = prefs.xmodem1K
         session.traceDirectory = prefs.logDirectory
         session.pacing = connection.pacing
+        session.zmodemReceiveCommand = connection.zmodemReceiveCommand
         session.onDisplay = { [display] data in display.append(data) }
         session.onEvent = { [weak self] event in
             Task { @MainActor in self?.handle(event) }
@@ -363,6 +364,7 @@ final class TerminalModel: ObservableObject {
         }
         guard let session else { return }
         session.pacing = connection.pacing
+        session.zmodemReceiveCommand = connection.zmodemReceiveCommand
         if connection.config != old.config {
             do {
                 try session.port.reconfigure(connection.config)

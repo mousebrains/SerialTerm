@@ -224,9 +224,12 @@ final class ZmodemSender {
     /// Bytes between acknowledgements; 0 means stream continuously.
     private var window = 0
 
-    init(link: ZLink, options: ZmodemOptions) {
+    private let receiveCommand: String
+
+    init(link: ZLink, options: ZmodemOptions, receiveCommand: String = "rz") {
         self.link = link
         self.options = options
+        self.receiveCommand = receiveCommand
     }
 
     struct Result {
@@ -260,9 +263,12 @@ final class ZmodemSender {
     // MARK: Session start and end
 
     private func handshake() throws {
-        // "rz\r" starts the receiver if the remote is sitting at a shell prompt.
-        link.trace?.line(.tx, "\"rz\\r\"")
-        link.send("rz\r")
+        // Starts the receiver if the remote is sitting at its prompt ("rz", or "zr" on a Slocum).
+        // A receiver that is already running skips it as noise.
+        if !receiveCommand.isEmpty {
+            link.trace?.line(.tx, "\"\(receiveCommand)\\r\"")
+            link.send(receiveCommand + "\r")
+        }
         link.sendHex(ZHeader(.rqinit))
         reader.waitingFor = "ZRINIT from receiver"
         for _ in 0..<6 {

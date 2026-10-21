@@ -51,7 +51,8 @@ with the settings used most recently.
 ### Presets
 
 A preset is a named set of line settings: baud rate, data bits, parity, stop bits, flow control,
-what the Backspace key sends, and the typing pace. It can also include a port.
+what the Backspace key sends, the typing pace, and the command that starts the device's ZMODEM
+receiver (`rz` or `zr`). It can also include a port.
 
 - **Save**: set up a window, then choose **Presets ▸ Save Current Settings as Preset…** and give
   it a name. Turn on **Include port** to save the window's port with it. Saving under an existing
@@ -98,7 +99,7 @@ Above about 1 Mbaud, use RTS/CTS flow control if the device supports it.
 | Transfer menu | ZMODEM / YMODEM / XMODEM send and receive, Cancel Transfer, Open Last ZMODEM Trace, Show Download Folder |
 | ● Log | Turn session logging on or off (red while logging) |
 | Line menu | Send Break, Send Window Size (stty), Clear Screen |
-| Slider | Data bits, parity, stop bits, flow control, Backspace key, typing pace; **More Settings…** |
+| Slider | Data bits, parity, stop bits, flow control, Backspace key, typing pace, ZMODEM receive command; **More Settings…** |
 
 If the window is narrow, macOS moves some toolbar items behind a `»` button.
 
@@ -189,7 +190,9 @@ files into the download folder.
 - Run `rz` on the device. SerialTerm detects it and opens a file picker; ⌘-click to choose
   several files.
 - At the device's shell prompt, choose **Transfer ▸ ZMODEM ▸ Send Files…**. SerialTerm types
-  `rz` for you.
+  the device's receive command for you: `rz` by default, or what *ZMODEM send starts receiver
+  with* under the slider button says (`zr` for Slocum gliders, or nothing). It is harmless if
+  the receiver is already running, and it can be part of a preset.
 - Drop files onto the terminal window.
 
 **Progress** appears in the status bar. **Cancel** (status bar or Transfer menu) stops both ends.

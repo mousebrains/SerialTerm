@@ -16,6 +16,8 @@ struct ConnectionSettings: Codable, Equatable {
     var backspaceSendsControlH = false
     /// Rate limit for typed and pasted text.
     var pacing = Pacing()
+    /// Typed before a ZMODEM send to start the device's receiver: "rz", "zr" (Slocum), or "" for none.
+    var zmodemReceiveCommand = "rz"
 
     init() {}
 
@@ -28,6 +30,7 @@ struct ConnectionSettings: Codable, Equatable {
         config = (try? c.decode(SerialConfig.self, forKey: .config)) ?? d.config
         backspaceSendsControlH = (try? c.decode(Bool.self, forKey: .backspaceSendsControlH)) ?? d.backspaceSendsControlH
         pacing = (try? c.decode(Pacing.self, forKey: .pacing)) ?? d.pacing
+        zmodemReceiveCommand = (try? c.decode(String.self, forKey: .zmodemReceiveCommand)) ?? d.zmodemReceiveCommand
     }
 
     /// Apply a preset's line and keyboard settings, keeping the port.
@@ -35,6 +38,7 @@ struct ConnectionSettings: Codable, Equatable {
         config = preset.config
         backspaceSendsControlH = preset.backspaceSendsControlH
         pacing = preset.pacing
+        zmodemReceiveCommand = preset.zmodemReceiveCommand
     }
 }
 
@@ -46,6 +50,7 @@ struct ConnectionPreset: Codable, Equatable, Identifiable {
     var config: SerialConfig
     var backspaceSendsControlH: Bool
     var pacing: Pacing
+    var zmodemReceiveCommand: String
     /// nil: applying the preset keeps the window's port.
     var port: PresetPort?
 
@@ -54,6 +59,7 @@ struct ConnectionPreset: Codable, Equatable, Identifiable {
         config = connection.config
         backspaceSendsControlH = connection.backspaceSendsControlH
         pacing = connection.pacing
+        zmodemReceiveCommand = connection.zmodemReceiveCommand
         self.port = port
     }
 
@@ -65,6 +71,7 @@ struct ConnectionPreset: Codable, Equatable, Identifiable {
         config = (try? c.decode(SerialConfig.self, forKey: .config)) ?? SerialConfig()
         backspaceSendsControlH = (try? c.decode(Bool.self, forKey: .backspaceSendsControlH)) ?? false
         pacing = (try? c.decode(Pacing.self, forKey: .pacing)) ?? Pacing()
+        zmodemReceiveCommand = (try? c.decode(String.self, forKey: .zmodemReceiveCommand)) ?? "rz"
         port = try? c.decode(PresetPort.self, forKey: .port)
     }
 
@@ -72,14 +79,16 @@ struct ConnectionPreset: Codable, Equatable, Identifiable {
     /// another port doesn't change the preset, so the port only counts when `includingPort`.
     func matches(_ connection: ConnectionSettings, includingPort: Bool = false) -> Bool {
         guard config == connection.config, backspaceSendsControlH == connection.backspaceSendsControlH,
-              pacing == connection.pacing else { return false }
+              pacing == connection.pacing, zmodemReceiveCommand == connection.zmodemReceiveCommand else { return false }
         guard includingPort, let port else { return true }
         return port.matches(path: connection.portPath, serialNumber: connection.portSerialNumber)
     }
 
-    /// Short form such as "9600 7E1, ⌫ = ^H, 30 char/s".
+    /// Short form such as "9600 7E1, ⌫ = ^H, 30 char/s, zr".
     var summary: String {
-        config.summary + (backspaceSendsControlH ? ", ⌫ = ^H" : "") + (pacing.isOn ? ", \(pacing.summary)" : "")
+        var s = config.summary + (backspaceSendsControlH ? ", ⌫ = ^H" : "") + (pacing.isOn ? ", \(pacing.summary)" : "")
+        if zmodemReceiveCommand != "rz" { s += zmodemReceiveCommand.isEmpty ? ", no rz" : ", \(zmodemReceiveCommand)" }
+        return s
     }
 }
 
@@ -171,6 +180,7 @@ struct Preferences: Codable, Equatable {
             presets[i].config = preset.config
             presets[i].backspaceSendsControlH = preset.backspaceSendsControlH
             presets[i].pacing = preset.pacing
+            presets[i].zmodemReceiveCommand = preset.zmodemReceiveCommand
             presets[i].port = preset.port
         } else {
             presets.append(preset)
