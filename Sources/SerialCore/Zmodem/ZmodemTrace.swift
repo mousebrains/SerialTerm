@@ -92,7 +92,9 @@ public final class ZmodemTrace: @unchecked Sendable {
     }
 
     deinit {
-        queue.sync { try? handle.close() }
+        // Every queued write holds a reference, so none is pending now. Don't sync onto
+        // `queue`: the last reference is often released by a write block running on it.
+        try? handle.close()
     }
 
     public static func defaultFileName(for date: Date = Date()) -> String {

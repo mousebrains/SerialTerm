@@ -40,6 +40,9 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
 - Builds and tests with only the Command Line Tools; Xcode is optional.
 
 ### Fixed
+- The app could crash just after a ZMODEM transfer ended, most often with raw-byte tracing at
+  high baud rates: the trace file was closed with a `sync` onto the queue that was releasing it.
+  The session log had the same flaw.
 - XMODEM receive failed with lrzsz's "Security Violation" (it refuses paths with directories);
   `lrx` now runs in the target folder.
 - Cancelling an XMODEM/YMODEM transfer mid-block could leave the remote receiver running (it

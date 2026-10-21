@@ -527,3 +527,24 @@ struct ZmodemDiagnosticsTests {
         #expect(recv.contains("TX ZACK hex  pos=2048"))
     }
 }
+
+struct ZmodemTraceTests {
+    /// The last reference to a trace is usually dropped by one of its own queued writes, so
+    /// deinit runs on the trace queue. It used to `sync` onto that queue and crash the app.
+    @Test func releasedWhileWritesAreQueued() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        for i in 0..<20 {
+            let url = dir.appendingPathComponent("trace\(i).log")
+            var trace: ZmodemTrace? = try ZmodemTrace(url: url, level: .verbose)
+            weak let released = trace
+            for n in 0..<2000 { trace?.note("line \(n)") }
+            trace = nil  // the queued writes now hold the only references
+            let deadline = Date().addingTimeInterval(10)
+            while released != nil, Date() < deadline { try await Task.sleep(nanoseconds: 1_000_000) }
+            #expect(released == nil)
+            let text = try String(contentsOf: url, encoding: .utf8)
+            #expect(text.split(separator: "\n").count == 2000)
+        }
+    }
+}

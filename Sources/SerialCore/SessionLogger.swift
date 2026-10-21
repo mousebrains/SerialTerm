@@ -40,7 +40,9 @@ public final class SessionLogger: @unchecked Sendable {
     }
 
     deinit {
-        queue.sync { try? handle.close() }
+        // Every queued write holds a reference, so none is pending now. Don't sync onto
+        // `queue`: the last reference is often released by a write block running on it.
+        try? handle.close()
     }
 
     /// A file name like `SerialTerm-2026-10-20-103201.log` for a new session.
