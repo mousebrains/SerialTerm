@@ -17,6 +17,10 @@ final class TerminalModel: ObservableObject {
     @Published private(set) var isConnected = false
     @Published private(set) var statusMessage = "Not connected"
     @Published private(set) var transferStatus: String?
+    /// Typed or pasted characters still waiting to go out under pacing.
+    @Published private(set) var pacedRemaining = 0
+    /// With wait-for-echo: the last paced character got no echo in time.
+    @Published private(set) var pacedEchoMissing = false
     @Published private(set) var logURL: URL?
     @Published private(set) var lastTraceURL: URL?
     @Published private(set) var cols = 80
@@ -82,6 +86,7 @@ final class TerminalModel: ObservableObject {
         session.zmodemOptions = prefs.zmodem
         session.xmodem1K = prefs.xmodem1K
         session.traceDirectory = prefs.logDirectory
+        session.pacing = connection.pacing
         session.onDisplay = { [display] data in display.append(data) }
         session.onEvent = { [weak self] event in
             Task { @MainActor in self?.handle(event) }
@@ -114,6 +119,8 @@ final class TerminalModel: ObservableObject {
         isConnected = false
         logURL = nil
         transferStatus = nil
+        pacedRemaining = 0
+        pacedEchoMissing = false
         statusMessage = "Not connected"
     }
 
@@ -175,6 +182,10 @@ final class TerminalModel: ObservableObject {
     /// A serial line can't tell the remote the window size; this does it via stty.
     func sendWindowSize() {
         session?.sendFromUser(Data("stty rows \(rows) cols \(cols)\r".utf8))
+    }
+
+    func cancelPacedTyping() {
+        session?.cancelPacedTyping()
     }
 
     func sendBreak() {
@@ -328,6 +339,9 @@ final class TerminalModel: ObservableObject {
                     session.abortRemoteTransfer()
                 }
             }
+        case let .pacedTyping(remaining, echoMissing):
+            pacedRemaining = remaining
+            pacedEchoMissing = echoMissing
         case let .disconnected(error):
             guard session != nil else { return }
             disconnect()
@@ -348,6 +362,7 @@ final class TerminalModel: ObservableObject {
             return
         }
         guard let session else { return }
+        session.pacing = connection.pacing
         if connection.config != old.config {
             do {
                 try session.port.reconfigure(connection.config)

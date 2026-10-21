@@ -30,13 +30,28 @@ The terminal shows dim local lines such as `[Connected: usbserial-A50285BI 11520
 when the same adapter (matched by USB serial number) is plugged back in, even under a different
 `/dev` name. You can turn this off in Settings ▸ General.
 
+**Paced typing**: some device command lines drop characters that arrive faster than they can
+parse them, typically above 10–50 characters a second, which garbles pasted commands. Under the
+slider button, set *Typing speed* (characters per second) and, if the device needs time to run each
+command, *Pause after each line*. Typed and pasted text then goes out at that pace, in order; file
+transfers always run at full speed.
+
+*Wait for each character's echo* sends the next character only when the device has echoed the
+previous one, so it goes as fast as the device keeps up. A printable character must come back as
+itself; Return as CR or LF; other control characters (Ctrl-C, Backspace) as anything. If no echo
+arrives within *Give up waiting after* (1 s by default), the character is sent anyway and the
+status bar shows **No echo**, so a device with echo off is slowed down but never stuck. The speed
+limit and line pause still apply, counted from each echo. While text is waiting, the status bar shows how much is left
+and a **Cancel** button; the status bar also shows the pace whenever it is on. Keys you type
+meanwhile, Ctrl-C included, queue behind the text, so use **Cancel** to stop a long paste.
+
 **Several devices**: each window (**⌘N**) has its own port and line settings. New windows start
 with the settings used most recently.
 
 ### Presets
 
 A preset is a named set of line settings: baud rate, data bits, parity, stop bits, flow control,
-and what the Backspace key sends. It can also include a port.
+what the Backspace key sends, and the typing pace. It can also include a port.
 
 - **Save**: set up a window, then choose **Presets ▸ Save Current Settings as Preset…** and give
   it a name. Turn on **Include port** to save the window's port with it. Saving under an existing
@@ -83,13 +98,14 @@ Above about 1 Mbaud, use RTS/CTS flow control if the device supports it.
 | Transfer menu | ZMODEM / YMODEM / XMODEM send and receive, Cancel Transfer, Open Last ZMODEM Trace, Show Download Folder |
 | ● Log | Turn session logging on or off (red while logging) |
 | Line menu | Send Break, Send Window Size (stty), Clear Screen |
-| Slider | Data bits, parity, stop bits, flow control, Backspace key; **More Settings…** |
+| Slider | Data bits, parity, stop bits, flow control, Backspace key, typing pace; **More Settings…** |
 
 If the window is narrow, macOS moves some toolbar items behind a `»` button.
 
 **Status bar**:
 - connection state and line settings, such as `115200 8N1`;
 - transfer progress (file, bytes, percent, rate) with a **Cancel** button;
+- paced typing still to send, with a **Cancel** button, and the pace when it is on;
 - the current log file (click to show it in Finder);
 - `⌫ = ^H` when the Backspace key sends Ctrl-H;
 - the terminal size in columns × rows.

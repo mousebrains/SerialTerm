@@ -12,8 +12,11 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
   stop bits, RTS/CTS and XON/XOFF flow control; changes apply immediately.
 - Choosing a port connects; typing at a disconnected terminal connects first; a connect bar and
   local `[Connected …]` / `[Disconnected]` lines.
+- Paced typing: typed and pasted text limited to N characters a second, optionally waiting for
+  each character's echo (with a timeout and a "No echo" warning), with an optional pause after
+  each line end; progress and Cancel in the status bar. File transfers are never paced.
 - Presets: named line settings (baud rate, data bits, parity, stop bits, flow control), the
-  Backspace key's code and optionally a port (found again by USB serial number), saved from and
+  Backspace key's code, the typing pace and optionally a port (found again by USB serial number), saved from and
   applied to any window; managed in Settings ▸ Presets.
 - Per-window Backspace key code (DEL or ^H), with the line settings; the old app-wide setting
   carries over.

@@ -13,6 +13,9 @@ public enum SessionEvent: Sendable {
     /// The remote ran lrzsz `sx` ("Give your local XMODEM receive command now."); the UI should ask
     /// where to save (then call `startTransfer(.xmodemReceive(url))`, or `abortRemoteTransfer()`).
     case remoteXmodemSending
+    /// Typed or pasted characters still waiting to go out under `pacing` (0 when done), and
+    /// whether the last character got no echo in time (with `pacing.waitForEcho`).
+    case pacedTyping(remaining: Int, echoMissing: Bool)
     case disconnected(Error?)
 }
 
@@ -39,6 +42,11 @@ public final class Session: @unchecked Sendable {
     public private(set) var lastTraceURL: URL?
     /// Where received files are saved.
     public var downloadDirectory: URL
+    /// Rate limit for typed and pasted text. File transfers are never paced.
+    public var pacing: Pacing {
+        get { pacer.pacing }
+        set { pacer.pacing = newValue }
+    }
 
     private let lock = NSLock()
     private var logger: SessionLogger?
@@ -53,10 +61,17 @@ public final class Session: @unchecked Sendable {
     private var cancelWatchUntil: Date?
     private var cancelRetries = 0
     private static let nak: UInt8 = 0x15
+    private let pacer = PacedSender()
 
     public init(port: SerialPort, downloadDirectory: URL) {
         self.port = port
         self.downloadDirectory = downloadDirectory
+        pacer.output = { [weak self] data in
+            guard let self else { return }
+            // A transfer that started meanwhile owns the line; the rest of the typing is dropped.
+            if self.isTransferring { self.pacer.cancel() } else { self.port.write(data) }
+        }
+        pacer.onPending = { [weak self] n, missing in self?.onEvent?(.pacedTyping(remaining: n, echoMissing: missing)) }
         port.onData = { [weak self] data in self?.handleIncoming(data) }
         port.onClose = { [weak self] error in
             guard let self else { return }
@@ -72,6 +87,7 @@ public final class Session: @unchecked Sendable {
     }
 
     public func close() {
+        pacer.cancel()
         port.close()
     }
 
@@ -104,12 +120,22 @@ public final class Session: @unchecked Sendable {
     // MARK: Sending
 
     /// Bytes typed or pasted by the user. Ignored while a transfer is running, since
-    /// stray keystrokes would corrupt it.
+    /// stray keystrokes would corrupt it. Sent at the rate `pacing` allows; the log records
+    /// them when typed.
     public func sendFromUser(_ data: Data) {
         let (busy, logger) = lock.withLock { (transfer != nil, self.logger) }
         guard !busy else { return }
         logger?.log(.tx, data)
-        port.write(data)
+        if pacer.pacing.isOn || pacer.isBusy {
+            pacer.send(data)  // also when pacing was just turned off, to keep the order
+        } else {
+            port.write(data)
+        }
+    }
+
+    /// Drop typed or pasted text that pacing hasn't sent yet.
+    public func cancelPacedTyping() {
+        pacer.cancel()
     }
 
     // MARK: Transfers
@@ -133,6 +159,7 @@ public final class Session: @unchecked Sendable {
         default:
             t = try ExternalTransfer(kind: kind, workingDirectory: downloadDirectory, xmodem1K: xmodem1K)
         }
+        pacer.cancel()
         let logger: SessionLogger? = try lock.withLock {
             guard transfer == nil else { throw TransferInProgress() }
             transfer = t
@@ -206,6 +233,7 @@ public final class Session: @unchecked Sendable {
         }
 
         logger?.log(.rx, data)
+        pacer.received(data)
         abortAgainIfRemoteStillReceiving(data)
 
         guard auto, let match = lock.withLock({ detector.scan(data) }) else {

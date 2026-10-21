@@ -14,6 +14,8 @@ struct ConnectionSettings: Codable, Equatable {
     var config = SerialConfig()
     /// The Backspace key sends Ctrl-H (0x08) instead of DEL (0x7F).
     var backspaceSendsControlH = false
+    /// Rate limit for typed and pasted text.
+    var pacing = Pacing()
 
     init() {}
 
@@ -25,12 +27,14 @@ struct ConnectionSettings: Codable, Equatable {
         portSerialNumber = try? c.decode(String.self, forKey: .portSerialNumber)
         config = (try? c.decode(SerialConfig.self, forKey: .config)) ?? d.config
         backspaceSendsControlH = (try? c.decode(Bool.self, forKey: .backspaceSendsControlH)) ?? d.backspaceSendsControlH
+        pacing = (try? c.decode(Pacing.self, forKey: .pacing)) ?? d.pacing
     }
 
     /// Apply a preset's line and keyboard settings, keeping the port.
     mutating func apply(_ preset: ConnectionPreset) {
         config = preset.config
         backspaceSendsControlH = preset.backspaceSendsControlH
+        pacing = preset.pacing
     }
 }
 
@@ -41,6 +45,7 @@ struct ConnectionPreset: Codable, Equatable, Identifiable {
     var name: String
     var config: SerialConfig
     var backspaceSendsControlH: Bool
+    var pacing: Pacing
     /// nil: applying the preset keeps the window's port.
     var port: PresetPort?
 
@@ -48,20 +53,33 @@ struct ConnectionPreset: Codable, Equatable, Identifiable {
         self.name = name
         config = connection.config
         backspaceSendsControlH = connection.backspaceSendsControlH
+        pacing = connection.pacing
         self.port = port
+    }
+
+    // Decode field by field so presets saved by an older version keep working.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? c.decode(UUID.self, forKey: .id)) ?? UUID()
+        name = try c.decode(String.self, forKey: .name)
+        config = (try? c.decode(SerialConfig.self, forKey: .config)) ?? SerialConfig()
+        backspaceSendsControlH = (try? c.decode(Bool.self, forKey: .backspaceSendsControlH)) ?? false
+        pacing = (try? c.decode(Pacing.self, forKey: .pacing)) ?? Pacing()
+        port = try? c.decode(PresetPort.self, forKey: .port)
     }
 
     /// True when the window is using this preset's line and keyboard settings. Choosing
     /// another port doesn't change the preset, so the port only counts when `includingPort`.
     func matches(_ connection: ConnectionSettings, includingPort: Bool = false) -> Bool {
-        guard config == connection.config, backspaceSendsControlH == connection.backspaceSendsControlH else { return false }
+        guard config == connection.config, backspaceSendsControlH == connection.backspaceSendsControlH,
+              pacing == connection.pacing else { return false }
         guard includingPort, let port else { return true }
         return port.matches(path: connection.portPath, serialNumber: connection.portSerialNumber)
     }
 
-    /// Short form such as "9600 7E1, ⌫ = ^H".
+    /// Short form such as "9600 7E1, ⌫ = ^H, 30 char/s".
     var summary: String {
-        config.summary + (backspaceSendsControlH ? ", ⌫ = ^H" : "")
+        config.summary + (backspaceSendsControlH ? ", ⌫ = ^H" : "") + (pacing.isOn ? ", \(pacing.summary)" : "")
     }
 }
 
@@ -152,6 +170,7 @@ struct Preferences: Codable, Equatable {
         if let i = presets.firstIndex(where: { $0.name == preset.name }) {
             presets[i].config = preset.config
             presets[i].backspaceSendsControlH = preset.backspaceSendsControlH
+            presets[i].pacing = preset.pacing
             presets[i].port = preset.port
         } else {
             presets.append(preset)

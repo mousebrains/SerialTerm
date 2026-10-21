@@ -81,10 +81,11 @@ struct ContentView: View {
             } label: {
                 Label("Line Settings", systemImage: "slider.horizontal.3")
             }
-            .help("Data bits, parity, stop bits, flow control, Backspace key")
+            .help("Data bits, parity, stop bits, flow control, Backspace key, typing pace")
             .popover(isPresented: $popovers.showLineSettings, arrowEdge: .bottom) {
                 LineSettingsView(config: $model.connection.config,
-                                 backspaceSendsControlH: $model.connection.backspaceSendsControlH)
+                                 backspaceSendsControlH: $model.connection.backspaceSendsControlH,
+                                 pacing: $model.connection.pacing)
             }
         }
     }
@@ -263,6 +264,17 @@ struct ContentView: View {
                 Text(transfer).lineLimit(1).truncationMode(.middle)
                 Button("Cancel") { model.cancelTransfer() }
                     .controlSize(.small)
+            } else if model.pacedRemaining > 0 {
+                Divider().frame(height: 12)
+                Text("Typing \(model.pacedRemaining) more characters at \(model.connection.pacing.summary)…")
+                    .lineLimit(1)
+                if model.pacedEchoMissing {
+                    Label("No echo", systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.orange)
+                        .help("The device didn't echo the last character within \(String(format: "%g", model.connection.pacing.echoTimeout)) s, so it was sent on anyway. Turn off Wait for echo if the device doesn't echo.")
+                }
+                Button("Cancel") { model.cancelPacedTyping() }
+                    .controlSize(.small)
             } else if model.isConnected, model.statusMessage != "Connected" {
                 Divider().frame(height: 12)
                 Text(model.statusMessage).foregroundStyle(.secondary).lineLimit(1)
@@ -279,6 +291,11 @@ struct ContentView: View {
                 }
                 .buttonStyle(.borderless)
                 .help("Logging — click to show in Finder")
+            }
+            if model.connection.pacing.isOn {
+                Label(model.connection.pacing.summary, systemImage: "gauge.with.dots.needle.33percent")
+                    .foregroundStyle(.secondary)
+                    .help("Typed and pasted text is paced (change under the slider button)")
             }
             if model.connection.backspaceSendsControlH {
                 Text("⌫ = ^H").foregroundStyle(.secondary).help("Backspace sends Ctrl-H (change under the slider button)")
@@ -308,6 +325,7 @@ private final class PopoverState: ObservableObject {
 struct LineSettingsView: View {
     @Binding var config: SerialConfig
     @Binding var backspaceSendsControlH: Bool
+    @Binding var pacing: Pacing
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 0) {
@@ -333,6 +351,31 @@ struct LineSettingsView: View {
                     Text("DEL (0x7F)").tag(false)
                     Text("Ctrl-H (0x08)").tag(true)
                 }
+                Section {
+                    Picker("Typing speed", selection: $pacing.charactersPerSecond) {
+                        Text("Unlimited").tag(0)
+                        ForEach(Self.rates(including: pacing.charactersPerSecond), id: \.self) {
+                            Text("\($0) characters/s").tag($0)
+                        }
+                    }
+                    Picker("Pause after each line", selection: $pacing.lineDelay) {
+                        Text("None").tag(0.0)
+                        ForEach(Self.delays(including: pacing.lineDelay), id: \.self) {
+                            Text("\(String(format: "%g", $0)) s").tag($0)
+                        }
+                    }
+                    Toggle("Wait for each character's echo", isOn: $pacing.waitForEcho)
+                    if pacing.waitForEcho {
+                        Picker("Give up waiting after", selection: $pacing.echoTimeout) {
+                            ForEach(Self.echoTimeouts(including: pacing.echoTimeout), id: \.self) {
+                                Text("\(String(format: "%g", $0)) s").tag($0)
+                            }
+                        }
+                    }
+                } footer: {
+                    Text("For devices whose command line drops characters sent too fast. Applies to typed and pasted text; file transfers always run at full speed. Waiting for the echo goes as fast as the device keeps up; the speed limit and line pause still apply after each echo.")
+                        .foregroundStyle(.secondary)
+                }
             }
             .formStyle(.grouped)
 
@@ -343,6 +386,18 @@ struct LineSettingsView: View {
         }
         .frame(width: 340)
         .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private static func rates(including current: Int) -> [Int] {
+        Array(Set([5, 10, 20, 30, 50, 100, 200, 500] + (current > 0 ? [current] : []))).sorted()
+    }
+
+    private static func echoTimeouts(including current: Double) -> [Double] {
+        Array(Set([0.1, 0.25, 0.5, 1, 2, 5, current])).sorted()
+    }
+
+    private static func delays(including current: Double) -> [Double] {
+        Array(Set([0.05, 0.1, 0.25, 0.5, 1, 2] + (current > 0 ? [current] : []))).sorted()
     }
 }
 

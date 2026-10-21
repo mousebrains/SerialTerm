@@ -14,8 +14,11 @@ detailed protocol diagnostics, and millisecond-timestamped session logs.
 - **Speed**: 300 baud to 3 Mbaud from a menu, or any custom rate.
 - **Line**: 5–8 data bits, none/even/odd parity, 1–2 stop bits, RTS/CTS or XON/XOFF flow control.
   Changes take effect immediately.
-- **Presets**: save a window's line settings, Backspace key and (optionally) port under a name,
-  and apply them to any window from the toolbar.
+- **Paced typing**: limit typed and pasted text to so many characters a second, optionally wait
+  for each character's echo, and pause after each line, for device command lines that drop
+  characters sent too fast.
+- **Presets**: save a window's line settings, Backspace key, typing pace and (optionally) port
+  under a name, and apply them to any window from the toolbar.
 - **Terminal**: xterm-compatible (SwiftTerm) and resizes with the window. You can send the window
   size to the remote with `stty`, and Backspace can send `^H` instead of DEL.
 - **ZMODEM, built in**:
