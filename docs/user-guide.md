@@ -15,9 +15,9 @@
    **Choosing a port connects to it**, and choosing another switches to it.
 2. **Choose the baud rate** from the baud menu. Choose **Custom…** to enter any rate the adapter
    supports.
-3. **Adjust the line settings** (data bits, parity, stop bits, flow control) with the slider
-   button. The default is 8N1 with no flow control. Changes to an open connection take effect
-   immediately.
+3. **Adjust the line settings** (data bits, parity, stop bits, flow control, and what the
+   Backspace key sends) with the slider button. The default is 8N1 with no flow control and
+   Backspace sending DEL. Changes to an open connection take effect immediately.
 
 While disconnected, a bar across the top of the terminal shows the selected port and a
 **Connect** button. **Typing at a disconnected terminal connects first**, then sends the key, so
@@ -32,6 +32,26 @@ when the same adapter (matched by USB serial number) is plugged back in, even un
 
 **Several devices**: each window (**⌘N**) has its own port and line settings. New windows start
 with the settings used most recently.
+
+### Presets
+
+A preset is a named set of line settings: baud rate, data bits, parity, stop bits, flow control,
+and what the Backspace key sends. It can also include a port.
+
+- **Save**: set up a window, then choose **Presets ▸ Save Current Settings as Preset…** and give
+  it a name. Turn on **Include port** to save the window's port with it. Saving under an existing
+  name replaces that preset.
+- **Apply**: choose the preset from the **Presets** menu. It applies to that window only, and
+  immediately if the window is connected. A preset with a port also switches the window to that
+  port, which connects to it.
+- A saved port is found again by its USB serial number, so the preset follows whatever carries
+  the USB serial chip, even if macOS gives it a different `/dev` name. That is the instrument
+  when it has its own USB port, or the USB adapter when the instrument is wired to one.
+- Choosing another port in the toolbar afterwards is fine; it doesn't change the preset.
+- The menu's title shows the preset the window's settings match, or *Presets* if none does.
+- **Rename, reorder, delete, or change a preset's port** in **Settings ▸ Presets**. Set the port
+  to *Keep window's port* for a preset that should work with any port. Delete one from the menu
+  with **Presets ▸ Delete Preset**.
 
 ### Baud rates and adapters
 
@@ -58,11 +78,12 @@ Above about 1 Mbaud, use RTS/CTS flow control if the device supports it.
 |---|---|
 | Port menu | Select (and connect to) a port |
 | Baud menu | Common rates, or Custom… |
+| Presets menu | Apply, save or delete a [preset](#presets) |
 | ⚡ Connect / Disconnect | ⇧⌘K |
 | Transfer menu | ZMODEM / YMODEM / XMODEM send and receive, Cancel Transfer, Open Last ZMODEM Trace, Show Download Folder |
 | ● Log | Turn session logging on or off (red while logging) |
 | Line menu | Send Break, Send Window Size (stty), Clear Screen |
-| Slider | Data bits, parity, stop bits, flow control; **More Settings…** |
+| Slider | Data bits, parity, stop bits, flow control, Backspace key; **More Settings…** |
 
 If the window is narrow, macOS moves some toolbar items behind a `»` button.
 
@@ -82,8 +103,6 @@ tell the device. If full-screen programs on the device (`vi`, `less`, `top`) dra
 Open with **SerialTerm ▸ Settings…** (⌘,). These settings apply to all windows.
 
 **General**
-- *Backspace key sends*: DEL (0x7F, the default) or Ctrl-H (0x08). Some devices expect the other
-  one; if Backspace shows `^?` or `^H` instead of erasing, switch it.
 - *Font size*.
 - *Reconnect when the adapter is plugged back in*.
 
@@ -93,6 +112,8 @@ Open with **SerialTerm ▸ Settings…** (⌘,). These settings apply to all win
 - *Start transfers automatically*: ZMODEM when the remote runs `sz`/`rz`, and XMODEM when lrzsz's
   `sx` announces itself. *Use lrzsz instead of the built-in ZMODEM*.
 - *ZMODEM diagnostics* and *ZMODEM workarounds*: see [ZMODEM & Diagnostics](zmodem.md).
+
+**Presets**: rename, reorder or delete [presets](#presets), and change or clear each one's port.
 
 **Logging**
 - *Log sessions*, which is the same as the toolbar's ● Log button, and *Log folder* (default:
@@ -105,6 +126,9 @@ Open with **SerialTerm ▸ Settings…** (⌘,). These settings apply to all win
 - ⌘C / ⌘V copy and paste. Pasted text is sent to the device.
 - ⇧⌘K connects and disconnects. ⌘N opens a new window. ⌘, opens Settings.
 - Keystrokes are ignored while a file transfer is running, because they would corrupt it.
+- **Backspace** sends DEL (0x7F) by default. Some devices expect Ctrl-H (0x08) instead; if
+  Backspace shows `^?` or `^H` rather than erasing, change *Backspace sends* under the slider
+  button. This is set per window and can be part of a preset.
 
 ## Session logs
 

@@ -339,6 +339,7 @@ final class TerminalModel: ObservableObject {
 
     private func connectionChanged(from old: ConnectionSettings) {
         settings.prefs.lastConnection = connection
+        if connection.backspaceSendsControlH != old.backspaceSendsControlH { applyTerminalPrefs() }
         if connection.portPath != old.portPath {
             // Choosing a port connects to it; choosing another switches over.
             wantConnected = false
@@ -356,6 +357,50 @@ final class TerminalModel: ObservableObject {
                 statusMessage = "\(error)"
             }
         }
+    }
+
+    // MARK: Presets
+
+    /// The saved preset this window's settings match, if any; one naming this port wins.
+    var currentPreset: ConnectionPreset? {
+        prefs.presets.first { $0.matches(connection, includingPort: true) } ?? prefs.presets.first { $0.matches(connection) }
+    }
+
+    func applyPreset(_ preset: ConnectionPreset) {
+        var c = connection
+        c.apply(preset)
+        var missing: PresetPort?
+        if let port = preset.port {
+            // Prefer the same device or adapter, wherever it is now.
+            let found = port.find(in: knownPorts)
+            if found == nil { missing = port }
+            c.portPath = found?.path ?? port.path
+            c.portSerialNumber = found?.usbSerialNumber ?? port.serialNumber
+        }
+        connection = c  // one change: a new port connects, the same port is reconfigured
+        if let missing {
+            statusMessage = "\(preset.name): \(missing.displayName) is not plugged in"
+        } else if !isConnected, preset.port == nil {
+            statusMessage = "Preset: \(preset.name)"
+        }
+    }
+
+    /// The window's current port, in the form a preset stores it.
+    var currentPresetPort: PresetPort? {
+        guard let path = connection.portPath else { return nil }
+        if let info = knownPorts.first(where: { $0.path == path }) { return PresetPort(info) }
+        return PresetPort(path: path, serialNumber: connection.portSerialNumber)
+    }
+
+    /// Save this window's settings under `name`, replacing a preset of that name.
+    func saveCurrentAsPreset(named name: String, includePort: Bool) {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        settings.prefs.savePreset(ConnectionPreset(name: name, from: connection, port: includePort ? currentPresetPort : nil))
+    }
+
+    func deletePreset(_ preset: ConnectionPreset) {
+        settings.prefs.presets.removeAll { $0.id == preset.id }
     }
 
     private func prefsChanged(to new: Preferences) {
@@ -380,7 +425,7 @@ final class TerminalModel: ObservableObject {
 
     private func applyTerminalPrefs() {
         guard let tv = terminalView else { return }
-        tv.backspaceSendsControlH = prefs.swapBackspaceDelete
+        tv.backspaceSendsControlH = connection.backspaceSendsControlH
         if tv.font.pointSize != prefs.fontSize {
             tv.font = NSFont.monospacedSystemFont(ofSize: prefs.fontSize, weight: .regular)
         }

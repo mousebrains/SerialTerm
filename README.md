@@ -14,6 +14,8 @@ detailed protocol diagnostics, and millisecond-timestamped session logs.
 - **Speed**: 300 baud to 3 Mbaud from a menu, or any custom rate.
 - **Line**: 5–8 data bits, none/even/odd parity, 1–2 stop bits, RTS/CTS or XON/XOFF flow control.
   Changes take effect immediately.
+- **Presets**: save a window's line settings, Backspace key and (optionally) port under a name,
+  and apply them to any window from the toolbar.
 - **Terminal**: xterm-compatible (SwiftTerm) and resizes with the window. You can send the window
   size to the remote with `stty`, and Backspace can send `^H` instead of DEL.
 - **ZMODEM, built in**:
@@ -59,7 +61,8 @@ For XMODEM/YMODEM (and an optional lrzsz-based ZMODEM): `brew install lrzsz`.
 ## Quick start
 
 1. Plug in the adapter and pick it from the **port** menu in the toolbar. This connects.
-2. Pick the **baud rate**. Data bits, parity and flow control are under the slider icon.
+2. Pick the **baud rate**, or a saved setup from the **Presets** menu. Data bits, parity, flow
+   control and the Backspace key are under the slider icon.
 3. Type. While disconnected, typing connects to the selected port first.
 4. To receive files, run `sz file…` on the device. To send, run `rz` on the device, or drop files
    on the window.

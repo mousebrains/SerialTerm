@@ -53,6 +53,7 @@ struct ContentView: View {
             .help("Serial port")
 
             baudPicker
+            presetMenu
 
             Button {
                 model.toggleConnection(ports: scanner.ports)
@@ -80,9 +81,10 @@ struct ContentView: View {
             } label: {
                 Label("Line Settings", systemImage: "slider.horizontal.3")
             }
-            .help("Data bits, parity, stop bits, flow control")
+            .help("Data bits, parity, stop bits, flow control, Backspace key")
             .popover(isPresented: $popovers.showLineSettings, arrowEdge: .bottom) {
-                LineSettingsView(config: $model.connection.config)
+                LineSettingsView(config: $model.connection.config,
+                                 backspaceSendsControlH: $model.connection.backspaceSendsControlH)
             }
         }
     }
@@ -125,6 +127,65 @@ struct ContentView: View {
             model.connection.config.baudRate = rate
         }
         popovers.showCustomBaud = false
+    }
+
+    private var presetMenu: some View {
+        let current = model.currentPreset
+        return Menu {
+            ForEach(model.prefs.presets) { preset in
+                Button {
+                    model.applyPreset(preset)
+                } label: {
+                    let title = "\(preset.name) — \(preset.summary)" + (preset.port.map { " · \($0.displayName)" } ?? "")
+                    if preset.id == current?.id { Label(title, systemImage: "checkmark") } else { Text(title) }
+                }
+            }
+            if !model.prefs.presets.isEmpty { Divider() }
+            Button("Save Current Settings as Preset…") {
+                popovers.presetName = current?.name ?? ""
+                popovers.presetIncludesPort = current.map { $0.port != nil } ?? (model.connection.portPath != nil)
+                popovers.showSavePreset = true
+            }
+            if !model.prefs.presets.isEmpty {
+                Menu("Delete Preset") {
+                    ForEach(model.prefs.presets) { preset in
+                        Button(preset.name) { model.deletePreset(preset) }
+                    }
+                }
+            }
+        } label: {
+            Text(current?.name ?? "Presets").lineLimit(1)
+        }
+        .frame(minWidth: 100, maxWidth: 180)
+        .help("Saved line and keyboard settings")
+        .popover(isPresented: $popovers.showSavePreset, arrowEdge: .bottom) {
+            VStack(alignment: .leading) {
+                Text("Save \(ConnectionPreset(name: "", from: model.connection).summary) as:")
+                    .foregroundStyle(.secondary)
+                HStack {
+                    TextField("Preset name", text: $popovers.presetName)
+                        .frame(width: 200)
+                        .onSubmit(savePreset)
+                    Button("Save", action: savePreset)
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(popovers.presetName.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                if let port = model.currentPresetPort {
+                    Toggle("Include port: \(port.displayName)", isOn: $popovers.presetIncludesPort)
+                        .help("Choosing the preset will also switch to this device or adapter")
+                }
+                if model.prefs.presets.contains(where: { $0.name == popovers.presetName.trimmingCharacters(in: .whitespacesAndNewlines) }) {
+                    Text("Replaces the preset of that name.").font(.callout).foregroundStyle(.secondary)
+                }
+            }
+            .padding()
+        }
+    }
+
+    private func savePreset() {
+        model.saveCurrentAsPreset(named: popovers.presetName, includePort: popovers.presetIncludesPort)
+        popovers.showSavePreset = false
+        model.focusTerminal()
     }
 
     private var transferMenu: some View {
@@ -219,8 +280,8 @@ struct ContentView: View {
                 .buttonStyle(.borderless)
                 .help("Logging — click to show in Finder")
             }
-            if model.prefs.swapBackspaceDelete {
-                Text("⌫ = ^H").foregroundStyle(.secondary).help("Backspace sends Ctrl-H (change in Settings)")
+            if model.connection.backspaceSendsControlH {
+                Text("⌫ = ^H").foregroundStyle(.secondary).help("Backspace sends Ctrl-H (change under the slider button)")
             }
             Text("\(model.cols)×\(model.rows)").monospacedDigit().foregroundStyle(.secondary)
         }
@@ -237,11 +298,16 @@ private final class PopoverState: ObservableObject {
     @Published var showCustomBaud = false
     /// The custom-baud field's text.
     @Published var customBaud = ""
+    @Published var showSavePreset = false
+    /// The save-preset field's text.
+    @Published var presetName = ""
+    @Published var presetIncludesPort = true
 }
 
 /// Per-window line settings, shown from the toolbar.
 struct LineSettingsView: View {
     @Binding var config: SerialConfig
+    @Binding var backspaceSendsControlH: Bool
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 0) {
@@ -263,6 +329,10 @@ struct LineSettingsView: View {
                     Text("RTS/CTS (hardware)").tag(SerialConfig.FlowControl.rtsCts)
                     Text("XON/XOFF (software)").tag(SerialConfig.FlowControl.xonXoff)
                 }
+                Picker("Backspace sends", selection: $backspaceSendsControlH) {
+                    Text("DEL (0x7F)").tag(false)
+                    Text("Ctrl-H (0x08)").tag(true)
+                }
             }
             .formStyle(.grouped)
 
@@ -279,17 +349,11 @@ struct LineSettingsView: View {
 /// The app's Settings window (SerialTerm ▸ Settings…, ⌘,).
 struct SettingsWindow: View {
     @ObservedObject var settings: AppSettings
+    @EnvironmentObject private var scanner: PortScanner
 
     var body: some View {
         TabView {
             Form {
-                Section("Keyboard") {
-                    Picker("Backspace key sends", selection: $settings.prefs.swapBackspaceDelete) {
-                        Text("DEL (0x7F) — standard").tag(false)
-                        Text("Ctrl-H (0x08)").tag(true)
-                    }
-                    .pickerStyle(.radioGroup)
-                }
                 Section("Display") {
                     Stepper("Font size: \(Int(settings.prefs.fontSize)) pt", value: $settings.prefs.fontSize, in: 8...36)
                 }
@@ -357,6 +421,38 @@ struct SettingsWindow: View {
 
             Form {
                 Section {
+                    if settings.prefs.presets.isEmpty {
+                        Text("No presets yet.").foregroundStyle(.secondary)
+                    }
+                    ForEach($settings.prefs.presets) { $preset in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                TextField("Name", text: $preset.name)
+                                    .labelsHidden()
+                                Text(preset.summary).font(.callout).monospacedDigit().foregroundStyle(.secondary)
+                            }
+                            PresetPortPicker(port: $preset.port, ports: scanner.ports)
+                                .frame(width: 200)
+                            Button {
+                                settings.prefs.presets.removeAll { $0.id == preset.id }
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Delete preset")
+                        }
+                    }
+                    .onMove { settings.prefs.presets.move(fromOffsets: $0, toOffset: $1) }
+                } footer: {
+                    Text("A preset holds the baud rate, data bits, parity, stop bits, flow control and Backspace key, and optionally a port. Save one from a window's Presets menu; choosing it there applies it to that window, immediately if connected. A preset with a port also switches the window to that device, found by its USB serial number; with \"Keep window's port\" it leaves the port alone.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .formStyle(.grouped)
+            .tabItem { Label("Presets", systemImage: "list.bullet.rectangle") }
+
+            Form {
+                Section {
                     Toggle("Log sessions", isOn: $settings.prefs.loggingEnabled)
                     FolderRow(title: "Log folder", url: $settings.prefs.logDirectory)
                 }
@@ -370,6 +466,34 @@ struct SettingsWindow: View {
             .tabItem { Label("Logging", systemImage: "doc.text") }
         }
         .frame(width: 560, height: 520)
+    }
+}
+
+/// Chooses a preset's port: none (keep the window's), a plugged-in port, or the saved one while unplugged.
+private struct PresetPortPicker: View {
+    @Binding var port: PresetPort?
+    let ports: [SerialPortInfo]
+
+    var body: some View {
+        let selected = port.flatMap { $0.find(in: ports)?.path } ?? port?.path
+        Picker("Port", selection: Binding<String?>(
+            get: { selected },
+            set: { path in
+                guard let path else { port = nil; return }
+                if let info = ports.first(where: { $0.path == path }) { port = PresetPort(info) }
+            }
+        )) {
+            Text("Keep window's port").tag(String?.none)
+            Divider()
+            ForEach(ports) { info in
+                Text(info.displayName).tag(String?.some(info.path))
+            }
+            if let port, port.find(in: ports) == nil {
+                Text("\(port.displayName) (not present)").tag(String?.some(port.path))
+            }
+        }
+        .labelsHidden()
+        .help("Port the preset switches to")
     }
 }
 

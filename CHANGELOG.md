@@ -12,8 +12,12 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
   stop bits, RTS/CTS and XON/XOFF flow control; changes apply immediately.
 - Choosing a port connects; typing at a disconnected terminal connects first; a connect bar and
   local `[Connected …]` / `[Disconnected]` lines.
-- Settings window: the Backspace key's code (DEL or ^H), font size, folders for downloads, uploads
-  and logs, transfer options.
+- Presets: named line settings (baud rate, data bits, parity, stop bits, flow control), the
+  Backspace key's code and optionally a port (found again by USB serial number), saved from and
+  applied to any window; managed in Settings ▸ Presets.
+- Per-window Backspace key code (DEL or ^H), with the line settings; the old app-wide setting
+  carries over.
+- Settings window: font size, folders for downloads, uploads and logs, transfer options.
 - Session logs with millisecond timestamps.
 - Native ZMODEM: batch send and receive, CRC-16/32, streaming with `ZRPOS` recovery, windowed mode,
   `ESCCTL`, automatic start on `sz`/`rz`, drag-and-drop send, safe file names, no overwriting,

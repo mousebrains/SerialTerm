@@ -18,6 +18,7 @@ struct SerialTermApp: App {
 
         Settings {
             SettingsWindow(settings: AppSettings.shared)
+                .environmentObject(scanner)
         }
     }
 }
