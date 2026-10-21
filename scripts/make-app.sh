@@ -14,9 +14,11 @@ fi
 
 VERSION="${VERSION:-0.1.0}"
 BUILD="${BUILD:-1}"
+# Extra `swift build` flags, e.g. --disable-sandbox inside Homebrew's build sandbox.
+FLAGS=(${=SWIFT_BUILD_FLAGS:-})
 
-swift build -c release --product SerialTerm
-BIN="$(swift build -c release --show-bin-path)/SerialTerm"
+swift build -c release --product SerialTerm $FLAGS
+BIN="$(swift build -c release --show-bin-path $FLAGS)/SerialTerm"
 
 APP=build/SerialTerm.app
 rm -rf "$APP"

@@ -34,6 +34,14 @@ detailed protocol diagnostics, and millisecond-timestamped session logs.
 
 Requires macOS 15 (Sequoia) or later.
 
+- **Homebrew**: builds from source, so macOS doesn't block it, and installs lrzsz too. Needs
+  Xcode 26 or the Command Line Tools 26 or later.
+
+  ```sh
+  brew install mousebrains/tap/serialterm
+  serialterm                     # opens the app; `brew info serialterm` shows how to add it to Applications
+  ```
+
 - **Download**: get `SerialTerm.zip` from [Releases](https://github.com/mousebrains/SerialTerm/releases).
   The app is not notarized, so macOS blocks it the first time: open it once, then click
   **Open Anyway** in **System Settings ▸ Privacy & Security**. Each new version needs this once.
