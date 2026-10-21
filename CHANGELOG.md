@@ -43,6 +43,11 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
 - ZMODEM sender: duplicate `ZRPOS` requests (lrzsz repeats them while skipping in-flight data)
   caused cascading rewinds and "Too many errors". Repeats are now ignored, and stale queued
   output is discarded on a rewind.
+- ZMODEM: a transfer could stall and then fail with "no reply to ZEOF" when the data right after
+  a rewind was damaged too. The sender took the receiver's genuine repeat `ZRPOS` for a
+  duplicate, and our receiver, ignoring the sender's stale `ZEOF`s, never asked again. The
+  sender now rewinds when `ZEOF` goes unanswered after an ignored `ZRPOS`, and stale `ZEOF`s no
+  longer postpone the receiver's timeout. Found as an intermittent CI failure.
 
 ### Verified on hardware
 - Rockland MicroRider (native USB serial): ZMODEM in both directions, single files and batches,

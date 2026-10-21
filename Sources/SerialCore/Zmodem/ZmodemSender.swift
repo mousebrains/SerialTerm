@@ -323,20 +323,26 @@ final class ZmodemSender {
         var errors = 0
         let blockSize = max(32, options.blockSize)
         var lastRewind: (position: Int, time: Date)?
+        /// A ZRPOS taken for a duplicate since the last rewind; see the ZEOF wait.
+        var ignoredPosition: Int?
 
         /// lrzsz's receiver repeats ZRPOS while it skips the data that was in flight. A repeat of
         /// the position we just rewound to is a duplicate; acting on it would inject another ZDATA
         /// header into the stream the receiver has resumed, and errors snowball. A repeat after
-        /// a while (e.g. the receiver's timeout) is genuine.
+        /// a while (e.g. the receiver's timeout) is genuine. So is a quick repeat when the data
+        /// right after the rewind was damaged too, which only shows when the receiver then
+        /// ignores our ZEOF.
         func isDuplicate(_ p: Int) -> Bool {
             guard let last = lastRewind, last.position == p, Date().timeIntervalSince(last.time) < 2 else { return false }
             link.log("Ignoring duplicate ZRPOS \(p) for \(name)")
+            ignoredPosition = p
             return true
         }
 
         func rewind(to p: Int, _ why: String) throws {
             link.discardUnsent()
             lastRewind = (p, Date())
+            ignoredPosition = nil
             errors += 1
             link.log("Resending \(name) from \(p) (\(why)); was at \(pos)")
             if errors > 30 { throw ZmodemError.tooManyErrors("\(name): receiver kept rejecting data") }
@@ -422,34 +428,45 @@ final class ZmodemSender {
             // End of file: the receiver answers ZRINIT once it has everything.
             var eofTries = 0
             reader.waitingFor = "reply to ZEOF"
-            while true {
+            eof: while true {
                 link.sendBinary(ZHeader(.eof, position: data.count), crc32: useCRC32)
                 eofTries += 1
-                let h: ZHeader?
-                do {
-                    h = try reader.readHeader(timeout: timeout)
-                } catch ZmodemError.timeout {
-                    if eofTries > 10 { throw ZmodemError.tooManyErrors("no reply to ZEOF") }
-                    continue
-                }
-                guard let h else { continue }
-                switch h.frame {
-                case .rinit:
-                    link.progress("Sent", name, data.count, data.count, force: true)
-                    link.log("Sent \(name)")
-                    return .sent(data.count)
-                case .rpos:
-                    if isDuplicate(h.position) { continue }
-                    try rewind(to: h.position, "ZRPOS after ZEOF")
-                    continue stream
-                case .skip:
-                    return .skipped
-                case .ack:
-                    continue
-                case .abort, .ferr, .can:
-                    throw ZmodemError.protocolError("Receiver aborted (\(h.name))")
-                default:
-                    continue
+                let deadline = Date().addingTimeInterval(timeout)
+                while true {
+                    let h: ZHeader?
+                    do {
+                        h = try reader.readHeader(timeout: max(0.05, deadline.timeIntervalSinceNow))
+                    } catch ZmodemError.timeout {
+                        // A receiver still waiting for data ignores ZEOF. If it's waiting at a
+                        // position we ignored, that ZRPOS was genuine; without this, each side
+                        // waits for the other until we give up.
+                        if let p = ignoredPosition {
+                            try rewind(to: p, "no reply to ZEOF after an ignored ZRPOS")
+                            continue stream
+                        }
+                        if eofTries > 10 { throw ZmodemError.tooManyErrors("no reply to ZEOF") }
+                        continue eof
+                    }
+                    guard let h else { continue eof }
+                    switch h.frame {
+                    case .rinit:
+                        link.progress("Sent", name, data.count, data.count, force: true)
+                        link.log("Sent \(name)")
+                        return .sent(data.count)
+                    case .rpos:
+                        // A duplicate isn't a reply: keep waiting rather than repeating ZEOF.
+                        if isDuplicate(h.position) { continue }
+                        try rewind(to: h.position, "ZRPOS after ZEOF")
+                        continue stream
+                    case .skip:
+                        return .skipped
+                    case .ack:
+                        continue eof
+                    case .abort, .ferr, .can:
+                        throw ZmodemError.protocolError("Receiver aborted (\(h.name))")
+                    default:
+                        continue eof
+                    }
                 }
             }
         }

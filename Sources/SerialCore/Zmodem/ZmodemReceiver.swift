@@ -134,12 +134,16 @@ final class ZmodemReceiver {
         }
 
         link.sendHex(ZHeader(.rpos, position: 0))
+        var staleEOFDeadline: Date?
         while true {
             reader.waitingFor = "ZDATA/ZEOF for \(meta.name) at \(offset)"
+            let wait = staleEOFDeadline.map { max(0.05, $0.timeIntervalSinceNow) } ?? timeout
+            let deadline = Date().addingTimeInterval(wait)
+            staleEOFDeadline = nil
             let h: ZHeader?
             do {
                 // After an error the sender's in-flight data arrives before it reacts, so allow plenty of noise.
-                h = try reader.readHeader(timeout: timeout, garbageLimit: 1 << 22)
+                h = try reader.readHeader(timeout: wait, garbageLimit: 1 << 22)
             } catch ZmodemError.timeout {
                 try requestResend("timeout")
                 continue
@@ -197,9 +201,12 @@ final class ZmodemReceiver {
                     }
                 }
             case .eof:
-                // A ZEOF for a different offset is stale; the sender will resend.
+                // A ZEOF for a different offset may have left before our ZRPOS arrived, so ignore
+                // it (as lrzsz does) but keep our timeout running: a sender repeating ZEOF faster
+                // than that would otherwise stop us from ever asking for the data again.
                 guard h.position == offset else {
                     link.trace?.note("ignoring ZEOF at \(h.position); have \(offset) bytes")
+                    staleEOFDeadline = deadline
                     continue
                 }
                 if let size = meta.size, size != offset {

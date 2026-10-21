@@ -133,6 +133,54 @@ final class Mangler: @unchecked Sendable {
     }
 }
 
+/// Flips the byte `distance` bytes after the nth occurrence of a byte pattern, e.g. to damage
+/// the first subpacket after a rewind's ZDATA header.
+final class PatternMangler: @unchecked Sendable {
+    private let lock = NSLock()
+    private let pattern: [UInt8]
+    private let occurrence: Int
+    private let distance: Int
+    private var recent: [UInt8] = []
+    private var found = 0
+    private var countdown: Int?
+
+    init(after pattern: [UInt8], occurrence: Int, distance: Int) {
+        self.pattern = pattern
+        self.occurrence = occurrence
+        self.distance = distance
+    }
+
+    func apply(_ data: Data) -> Data {
+        lock.withLock {
+            var out = Data(data)
+            for i in out.indices {
+                let b = out[i]
+                if let c = countdown {
+                    countdown = c - 1
+                    if c == 1 { out[i] = b ^ 0x55; countdown = nil }
+                }
+                recent.append(b)
+                if recent.count > pattern.count { recent.removeFirst() }
+                if recent == pattern {
+                    found += 1
+                    if found == occurrence { countdown = distance }
+                }
+            }
+            return out
+        }
+    }
+}
+
+func occurrences(of needle: Data, in haystack: Data) -> Int {
+    var count = 0
+    var from = haystack.startIndex
+    while let r = haystack.range(of: needle, in: from..<haystack.endIndex) {
+        count += 1
+        from = r.upperBound
+    }
+    return count
+}
+
 @Suite(.serialized)
 struct ZmodemNativeTransferTests {
     func tempDir() throws -> URL {
@@ -252,6 +300,69 @@ struct ZmodemNativeTransferTests {
         let rewinds = logs.all.filter { $0.hasPrefix("Resending ") }.count
         #expect(rewinds <= 6, "3 faults should need about 3 rewinds, got \(rewinds)")
         #expect(logs.all.contains { $0.contains("duplicate ZRPOS") })
+    }
+
+    /// A ZRPOS for the position the sender just rewound to can be genuine: here the first
+    /// subpacket after the rewind is damaged too. The sender takes it for a duplicate, and the
+    /// receiver, like lrzsz, ignores the ZEOFs that follow because it still wants that data.
+    /// The sender has to work out that the ZRPOS was real; the receiver's long timeout keeps it
+    /// from rescuing the transfer by asking again.
+    @Test func recoversWhenAGenuineZRPOSLooksLikeADuplicate() throws {
+        let src = try tempDir(), dst = try tempDir()
+        let files = try makeFiles(in: src, sizes: [50_000])
+        var senderOptions = ZmodemOptions(), receiverOptions = ZmodemOptions()
+        senderOptions.timeout = 0.3
+        receiverOptions.timeout = 30
+        let sender = ZmodemTransfer(kind: .zmodemSend(files), directory: dst, options: senderOptions)
+        let receiver = ZmodemTransfer(kind: .zmodemReceive, directory: dst, options: receiverOptions)
+        var e = ZEncoder()
+        let zdata = Array(e.binaryHeader(ZHeader(.data, position: 0), crc32: true).prefix(4))
+        let firstError = Mangler(flipAt: [5_000])
+        let afterRewind = PatternMangler(after: zdata, occurrence: 2, distance: 40)
+        sender.onOutput = { receiver.feed(afterRewind.apply(firstError.apply($0))) }
+        receiver.onOutput = { sender.feed($0) }
+        let logs = Inbox<String>()
+        sender.onLog = { logs.add($0) }
+        let results = Inbox<(Bool, String)>()
+        sender.onFinish = { results.add(($0, $1)) }
+        receiver.onFinish = { results.add(($0, $1)) }
+        try receiver.start()
+        try sender.start()
+        #expect(results.wait(timeout: 60) { $0.count == 2 })
+        #expect(logs.all.contains { $0.contains("duplicate ZRPOS") }, "the scenario didn't happen: \(logs.all)")
+        #expect(results.all.allSatisfy { $0.0 }, "\(results.all)")
+        try expectSame(files, in: dst)
+        #expect(logs.all.contains { $0.contains("no reply to ZEOF after an ignored ZRPOS") })
+    }
+
+    /// A ZEOF for data the receiver doesn't have yet is ignored, but it mustn't restart the
+    /// receiver's timeout: a sender repeating ZEOF faster than that would keep it from ever
+    /// asking for the data again.
+    @Test func staleZEOFsDontPostponeTheReceiversTimeout() throws {
+        let dst = try tempDir()
+        var options = ZmodemOptions()
+        options.timeout = 0.5
+        let receiver = ZmodemTransfer(kind: .zmodemReceive, directory: dst, options: options)
+        let out = Inbox<Data>()
+        receiver.onOutput = { out.add($0) }
+        let results = Inbox<(Bool, String)>()
+        receiver.onFinish = { results.add(($0, $1)) }
+        try receiver.start()
+        #expect(out.wait(timeout: 5) { !$0.isEmpty })  // its ZRINIT
+
+        var e = ZEncoder()
+        let info = Array("stale.bin".utf8) + [0] + Array("1000 0 100644 0 1 1000".utf8) + [0]
+        receiver.feed(Data(e.binaryHeader(ZHeader(.file, zf0: Z.convBinary), crc32: true)
+            + e.subpacket(Data(info), end: Z.crcW, crc32: true)))
+        for _ in 0..<8 {
+            usleep(300_000)
+            receiver.feed(Data(e.binaryHeader(ZHeader(.eof, position: 1000), crc32: true)))
+        }
+        let asks = occurrences(of: Data("**\u{18}B09".utf8), in: out.all.reduce(Data(), +))
+        receiver.cancel()
+        #expect(results.wait(timeout: 10) { $0.count == 1 })
+        // One ZRPOS accepts the offer; over 2.4 s with a 0.5 s timeout it should ask again ~4 times.
+        #expect(asks >= 3, "receiver sent ZRPOS \(asks) times")
     }
 
     @Test func doesNotOverwriteExistingFiles() throws {

@@ -83,6 +83,13 @@ oversize subpacket, data at the wrong offset, or a timeout, it sends `ZRPOS` wit
 then ignores everything until a `ZDATA` header for that offset arrives. The sender, on `ZRPOS`,
 drops any output not yet written and restarts from the requested offset.
 
+lrzsz's receiver repeats `ZRPOS` while it skips the data that was in flight, so the sender
+ignores a repeat of the offset it restarted from within the last 2 s. A quick repeat can also be
+genuine, when the data right after the restart was damaged too. Then the receiver ignores the
+sender's `ZEOF`, because it doesn't have the data yet, and the sender, seeing no reply, restarts
+from that offset. The receiver ignores a `ZEOF` for a different offset, but it doesn't restart
+its timeout for it, so it asks again on schedule even while the sender keeps repeating `ZEOF`.
+
 Limits:
 - 50 errors per file when receiving, 30 rewinds per file when sending;
 - 10 retries for the handshake, the file offer and `ZEOF`.
