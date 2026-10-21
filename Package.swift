@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "SerialTerm",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v15)],
     products: [
         .executable(name: "SerialTerm", targets: ["SerialTerm"]),
         .library(name: "SerialCore", targets: ["SerialCore"]),

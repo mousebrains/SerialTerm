@@ -7,9 +7,9 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject private var scanner: PortScanner
     @StateObject private var model = TerminalModel()
-    @State private var showLineSettings = false
-    @State private var showCustomBaud = false
-    @State private var customBaud = ""
+    // Not SwiftUI's `State`: in the macOS 27 SDK it is a macro whose compiler plugin ships only
+    // with Xcode, and SerialTerm builds with the Command Line Tools alone. CI rejects it.
+    @StateObject private var popovers = PopoverState()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -76,12 +76,12 @@ struct ContentView: View {
 
             lineMenu
             Button {
-                showLineSettings.toggle()
+                popovers.showLineSettings.toggle()
             } label: {
                 Label("Line Settings", systemImage: "slider.horizontal.3")
             }
             .help("Data bits, parity, stop bits, flow control")
-            .popover(isPresented: $showLineSettings, arrowEdge: .bottom) {
+            .popover(isPresented: $popovers.showLineSettings, arrowEdge: .bottom) {
                 LineSettingsView(config: $model.connection.config)
             }
         }
@@ -100,17 +100,17 @@ struct ContentView: View {
             }
             Divider()
             Button("Custom…") {
-                customBaud = "\(current)"
-                showCustomBaud = true
+                popovers.customBaud = "\(current)"
+                popovers.showCustomBaud = true
             }
         } label: {
             Text("\(current) baud").monospacedDigit()
         }
         .frame(minWidth: 120)
         .help("Baud rate")
-        .popover(isPresented: $showCustomBaud, arrowEdge: .bottom) {
+        .popover(isPresented: $popovers.showCustomBaud, arrowEdge: .bottom) {
             HStack {
-                TextField("Baud rate", text: $customBaud)
+                TextField("Baud rate", text: $popovers.customBaud)
                     .frame(width: 120)
                     .onSubmit(applyCustomBaud)
                 Button("Set", action: applyCustomBaud)
@@ -121,10 +121,10 @@ struct ContentView: View {
     }
 
     private func applyCustomBaud() {
-        if let rate = Int(customBaud.filter(\.isNumber)), rate > 0 {
+        if let rate = Int(popovers.customBaud.filter(\.isNumber)), rate > 0 {
             model.connection.config.baudRate = rate
         }
-        showCustomBaud = false
+        popovers.showCustomBaud = false
     }
 
     private var transferMenu: some View {
@@ -228,6 +228,15 @@ struct ContentView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 4)
     }
+}
+
+/// ContentView's popover state (see the note at `ContentView.popovers`).
+@MainActor
+private final class PopoverState: ObservableObject {
+    @Published var showLineSettings = false
+    @Published var showCustomBaud = false
+    /// The custom-baud field's text.
+    @Published var customBaud = ""
 }
 
 /// Per-window line settings, shown from the toolbar.

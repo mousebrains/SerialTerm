@@ -5,7 +5,8 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-# Use Xcode even if xcode-select still points at the Command Line Tools.
+# Prefer Xcode when it's installed, even if xcode-select points at the Command Line Tools
+# (which also work). Set DEVELOPER_DIR to choose.
 if [[ -z "${DEVELOPER_DIR:-}" && "$(xcode-select -p 2>/dev/null)" == *CommandLineTools* \
       && -d /Applications/Xcode.app ]]; then
     export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
@@ -34,7 +35,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>${VERSION}</string>
     <key>CFBundleVersion</key><string>${BUILD}</string>
-    <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>LSMinimumSystemVersion</key><string>15.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict>

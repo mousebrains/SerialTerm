@@ -32,11 +32,13 @@ detailed protocol diagnostics, and millisecond-timestamped session logs.
 
 ## Install
 
-Requires macOS 14 (Sonoma) or later.
+Requires macOS 15 (Sequoia) or later.
 
 - **Download**: get `SerialTerm.zip` from [Releases](https://github.com/mousebrains/SerialTerm/releases).
-  The app is not notarized, so the first time you open it, right-click it and choose **Open**.
-- **Build from source** (requires Xcode 26 or later):
+  The app is not notarized, so macOS blocks it the first time: open it once, then click
+  **Open Anyway** in **System Settings ▸ Privacy & Security**. Each new version needs this once.
+- **Build from source** (requires Xcode 26 or later, or only the Command Line Tools:
+  `xcode-select --install`):
 
   ```sh
   git clone git@github.com:mousebrains/SerialTerm.git

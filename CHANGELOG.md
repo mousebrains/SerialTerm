@@ -31,6 +31,10 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
 - XMODEM-1K option (Settings ▸ Transfers): 1024-byte blocks, ~1.5× faster to the MicroRider.
 - Licensed GPL-3.0-or-later.
 
+### Changed
+- Requires macOS 15 or later (was 14).
+- Builds and tests with only the Command Line Tools; Xcode is optional.
+
 ### Fixed
 - XMODEM receive failed with lrzsz's "Security Violation" (it refuses paths with directories);
   `lrx` now runs in the target folder.

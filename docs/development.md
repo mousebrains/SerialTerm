@@ -2,14 +2,13 @@
 
 ## Requirements
 
-- macOS 14 or later
-- Xcode 26 or later (Swift 6.2 toolchain, required by SwiftTerm; the package uses Swift 5 language mode)
+- macOS 15 or later
+- Xcode 26 or later, or only the Command Line Tools 26 or later (`xcode-select --install`): the
+  Swift 6.2 toolchain, required by SwiftTerm; the package uses Swift 5 language mode
 - `brew install lrzsz` (for the interop tests and for XMODEM/YMODEM)
 
-If `xcode-select -p` points at the Command Line Tools, either run
-`sudo xcode-select -s /Applications/Xcode.app` or prefix commands with
-`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`. `scripts/make-app.sh` does this for
-you.
+`swift build` and `swift test` use whichever `xcode-select -p` points at, unless `DEVELOPER_DIR`
+is set. `scripts/make-app.sh` uses Xcode when it's installed.
 
 ## Build and run
 
@@ -78,7 +77,7 @@ removes `~/tpw/rawtest.bin`; change the path in the test for other devices.
 
 | Workflow | Trigger | Does |
 |---|---|---|
-| `ci.yml` | push to `main`, pull requests | On macOS: install lrzsz, build, run all tests (debug), run the performance tests (release), build the app bundle and upload it as an artifact |
+| `ci.yml` | push to `main`, pull requests | On macOS: reject Xcode-only SwiftUI macros, install lrzsz, build, run all tests (debug), run the performance tests (release), build the app bundle and upload it as an artifact; separately, build the app bundle with only the Command Line Tools |
 | `release.yml` | tag `v*` (e.g. `v0.2.0`) | Run the tests, build `SerialTerm.app` with the tag's version, zip it, and publish a GitHub release with the zip and its SHA-256 |
 
 Dependabot (`.github/dependabot.yml`) opens weekly pull requests for GitHub Actions and Swift
@@ -89,13 +88,17 @@ package updates.
 1. Update `CHANGELOG.md` (move *Unreleased* to the new version).
 2. `git tag v0.2.0 && git push origin v0.2.0`
 3. The release workflow builds and publishes. Releases are ad-hoc signed and not notarized; users
-   open them with right-click ▸ Open the first time. For notarized builds, add a Developer ID
+   allow each new version once with Open Anyway in System Settings ▸ Privacy & Security. For
+   notarized builds, add a Developer ID
    certificate and `notarytool` credentials as repository secrets and extend `release.yml`.
 
 ## Conventions
 
 - `SerialCore` stays free of AppKit and SwiftUI.
 - Protocol code runs on its own thread as blocking code; UI state is `@MainActor`.
+- No SwiftUI `State`, `Entry`, `Animatable` or `AnimatableIgnored` attributes: in the macOS 27 SDK
+  they are macros whose compiler plugin ships only with Xcode, so they break builds with the
+  Command Line Tools. Keep view state in an `ObservableObject` held by `@StateObject`. CI checks.
 - New behavior comes with tests. Transfer changes should be checked against lrzsz, not only
   against the native implementation.
 - Comments explain *why*, especially for protocol behavior.

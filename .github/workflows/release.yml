@@ -47,5 +47,5 @@ jobs:
         run: |
           gh release create "${{ github.ref_name }}" build/SerialTerm.zip build/SerialTerm.zip.sha256 \
             --title "SerialTerm ${{ github.ref_name }}" \
-            --notes "Ad-hoc signed, not notarized: right-click ▸ Open the first time. See CHANGELOG.md for changes." \
+            --notes "Ad-hoc signed, not notarized: open it once, then click Open Anyway in System Settings ▸ Privacy & Security. See CHANGELOG.md for changes." \
             --verify-tag

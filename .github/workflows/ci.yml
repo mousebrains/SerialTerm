@@ -18,6 +18,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # In the macOS 27 SDK these are macros whose compiler plugin ships only with Xcode, so they
+      # break builds with the Command Line Tools. The runners' older SDKs wouldn't catch State.
+      - name: No Xcode-only SwiftUI macros
+        run: |
+          if grep -rnwE '@(State|Entry|Animatable|AnimatableIgnored)' Sources; then
+            echo "::error::These need Xcode's SwiftUIMacros plugin; use an ObservableObject held by @StateObject."
+            exit 1
+          fi
+
       - name: Select newest Xcode
         run: |
           ls -d /Applications/Xcode*.app
@@ -75,3 +84,20 @@ jobs:
           name: SerialTerm-${{ github.sha }}
           path: build/SerialTerm.zip
           retention-days: 14
+
+  command-line-tools:
+    name: App bundle (Command Line Tools only)
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Library/Developer/CommandLineTools
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Show Command Line Tools
+        run: |
+          pkgutil --pkg-info=com.apple.pkg.CLTools_Executables
+          swift --version
+
+      - name: Build SerialTerm.app
+        run: ./scripts/make-app.sh
