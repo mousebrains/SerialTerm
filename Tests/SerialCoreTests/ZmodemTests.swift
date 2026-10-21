@@ -217,6 +217,44 @@ final class HeaderDropper: @unchecked Sendable {
     }
 }
 
+/// Loses the first hex ZRPOS for each position, and passes repeats: a receiver that reports an
+/// error and is then silent until prodded, like a Slocum glider overrun at 921600 baud.
+final class FirstZRPOSDropper: @unchecked Sendable {
+    private let lock = NSLock()
+    private static let start = Array("**\u{18}B09".utf8)
+    private var pending: [UInt8] = []
+    private var seen: Set<[UInt8]> = []
+
+    func apply(_ data: Data) -> Data {
+        lock.withLock {
+            pending += data
+            var out = Data()
+            var i = 0
+            while i < pending.count {
+                let rest = pending[i...]
+                if rest.starts(with: Self.start) {
+                    guard rest.count >= 21 else { break }  // wait for the whole header
+                    let header = Array(rest.prefix(21))
+                    let position = Array(header[5..<13])
+                    if position != Array("00000000".utf8), !seen.contains(position) {
+                        seen.insert(position)
+                    } else {
+                        out.append(contentsOf: header)
+                    }
+                    i += 21
+                } else if Self.start.starts(with: rest.prefix(Self.start.count)) && rest.count < Self.start.count {
+                    break  // could be the start of a header
+                } else {
+                    out.append(pending[i])
+                    i += 1
+                }
+            }
+            pending.removeFirst(i)
+            return out
+        }
+    }
+}
+
 func occurrences(of needle: Data, in haystack: Data) -> Int {
     var count = 0
     var from = haystack.startIndex
@@ -410,6 +448,38 @@ struct ZmodemNativeTransferTests {
         try sender.start()
         #expect(results.wait(timeout: 30) { $0.count == 2 })
         #expect(logs.all.contains { $0.contains("resending from the last confirmed position") }, "the scenario didn't happen: \(logs.all)")
+        #expect(results.all.allSatisfy { $0.0 }, "\(results.all)")
+        try expectSame(files, in: dst)
+    }
+
+    /// The glider at 921600 does that over and over: each burst overruns it and it goes quiet
+    /// again, a little further on. Prodding must keep going while it makes progress.
+    @Test func keepsProddingAReceiverThatKeepsGoingQuiet() throws {
+        let src = try tempDir(), dst = try tempDir()
+        let files = try makeFiles(in: src, sizes: [60_000])
+        var senderOptions = ZmodemOptions(), receiverOptions = ZmodemOptions()
+        senderOptions.timeout = 0.3
+        receiverOptions.timeout = 60
+        let sender = ZmodemTransfer(kind: .zmodemSend(files), directory: dst, options: senderOptions)
+        let receiver = ZmodemTransfer(kind: .zmodemReceive, directory: dst, options: receiverOptions)
+        var e = ZEncoder()
+        let zdata = Array(e.binaryHeader(ZHeader(.data, position: 0), crc32: true).prefix(4))
+        // ZDATA headers alternate: data (damaged here), then a prod the receiver answers with its
+        // position, then the data from there (damaged again), and so on, five times.
+        let manglers = [1, 3, 5, 7, 9].map { PatternMangler(after: zdata, occurrence: $0, distance: 2_500) }
+        let silent = FirstZRPOSDropper()
+        sender.onOutput = { d in receiver.feed(manglers.reduce(d) { $1.apply($0) }) }
+        receiver.onOutput = { d in sender.feed(silent.apply(d)) }
+        let logs = Inbox<String>()
+        sender.onLog = { logs.add($0) }
+        let results = Inbox<(Bool, String)>()
+        sender.onFinish = { results.add(($0, $1)) }
+        receiver.onFinish = { results.add(($0, $1)) }
+        try receiver.start()
+        try sender.start()
+        #expect(results.wait(timeout: 60) { $0.count == 2 })
+        let prods = logs.all.filter { $0.contains("resending from the last confirmed position") }.count
+        #expect(prods > 3, "only \(prods) prods: \(logs.all)")
         #expect(results.all.allSatisfy { $0.0 }, "\(results.all)")
         try expectSame(files, in: dst)
     }

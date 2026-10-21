@@ -411,7 +411,8 @@ final class ZmodemSender {
         var ignoredPosition: Int?
         /// The receiver has said it has everything before this (its last ZRPOS or ZACK).
         var confirmed = pos
-        /// Times a silent receiver was prodded by resending from `confirmed`; see the ZEOF wait.
+        /// Times in a row a silent receiver was prodded by resending from `confirmed`, without it
+        /// confirming anything further; see the ZEOF wait.
         var prods = 0
 
         /// lrzsz's receiver repeats ZRPOS while it skips the data that was in flight. A repeat of
@@ -436,6 +437,7 @@ final class ZmodemSender {
             if errors > 30 { throw ZmodemError.tooManyErrors("\(name): receiver kept rejecting data") }
             guard p >= 0 && p <= data.count else { throw ZmodemError.protocolError("Receiver asked for invalid position \(p)") }
             pos = p
+            if p > confirmed { prods = 0 }  // it's making progress, however slowly
             confirmed = p
         }
 
@@ -482,7 +484,10 @@ final class ZmodemSender {
                         }
                         guard let h else { continue }
                         if h.frame == .ack {
-                            if h.position <= data.count { confirmed = max(confirmed, h.position) }
+                            if h.position <= data.count, h.position > confirmed {
+                                confirmed = h.position
+                                prods = 0
+                            }
                             continue stream
                         }
                         if h.frame == .rpos {
@@ -543,7 +548,8 @@ final class ZmodemSender {
                         // gliders go quiet after an overrun) waits for data at a position we don't
                         // know, and ignores ZEOF. Resend from the last position it confirmed: if
                         // that's where it is, the data flows; if not, it answers with a ZRPOS
-                        // giving its position. A few tries, so a receiver that has gone still fails.
+                        // giving its position. Three tries without progress, so a receiver that
+                        // has gone for good still fails.
                         if prods < 3 {
                             prods += 1
                             try rewind(to: confirmed, "no reply to ZEOF; resending from the last confirmed position")
