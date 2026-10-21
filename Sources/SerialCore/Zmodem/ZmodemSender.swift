@@ -409,6 +409,10 @@ final class ZmodemSender {
         var lastRewind: (position: Int, time: Date)?
         /// A ZRPOS taken for a duplicate since the last rewind; see the ZEOF wait.
         var ignoredPosition: Int?
+        /// The receiver has said it has everything before this (its last ZRPOS or ZACK).
+        var confirmed = pos
+        /// Times a silent receiver was prodded by resending from `confirmed`; see the ZEOF wait.
+        var prods = 0
 
         /// lrzsz's receiver repeats ZRPOS while it skips the data that was in flight. A repeat of
         /// the position we just rewound to is a duplicate; acting on it would inject another ZDATA
@@ -432,6 +436,7 @@ final class ZmodemSender {
             if errors > 30 { throw ZmodemError.tooManyErrors("\(name): receiver kept rejecting data") }
             guard p >= 0 && p <= data.count else { throw ZmodemError.protocolError("Receiver asked for invalid position \(p)") }
             pos = p
+            confirmed = p
         }
 
         stream: while true {
@@ -476,7 +481,10 @@ final class ZmodemSender {
                             continue stream
                         }
                         guard let h else { continue }
-                        if h.frame == .ack { continue stream }
+                        if h.frame == .ack {
+                            if h.position <= data.count { confirmed = max(confirmed, h.position) }
+                            continue stream
+                        }
                         if h.frame == .rpos {
                             if isDuplicate(h.position) { continue }
                             try rewind(to: h.position, "ZRPOS")
@@ -515,6 +523,9 @@ final class ZmodemSender {
             eof: while true {
                 link.sendBinary(ZHeader(.eof, position: data.count), crc32: useCRC32)
                 eofTries += 1
+                // Time the receiver's silence from when the data has left, not from when it was
+                // queued: at low baud rates the queue alone can take longer than the timeout.
+                link.waitForOutput()
                 let deadline = Date().addingTimeInterval(timeout)
                 while true {
                     let h: ZHeader?
@@ -526,6 +537,16 @@ final class ZmodemSender {
                         // waits for the other until we give up.
                         if let p = ignoredPosition {
                             try rewind(to: p, "no reply to ZEOF after an ignored ZRPOS")
+                            continue stream
+                        }
+                        // A receiver that lost data and whose ZRPOS was lost (or never sent: Slocum
+                        // gliders go quiet after an overrun) waits for data at a position we don't
+                        // know, and ignores ZEOF. Resend from the last position it confirmed: if
+                        // that's where it is, the data flows; if not, it answers with a ZRPOS
+                        // giving its position. A few tries, so a receiver that has gone still fails.
+                        if prods < 3 {
+                            prods += 1
+                            try rewind(to: confirmed, "no reply to ZEOF; resending from the last confirmed position")
                             continue stream
                         }
                         if eofTries > 10 { throw ZmodemError.tooManyErrors("no reply to ZEOF") }

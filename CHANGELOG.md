@@ -47,6 +47,11 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
 - Builds and tests with only the Command Line Tools; Xcode is optional.
 
 ### Fixed
+- ZMODEM send could stall for a minute and fail when the receiver lost data, asked for a resend,
+  lost data again and went quiet (as Slocum gliders do at 921600 baud). After a ZEOF gets no
+  reply the sender now resends from the last position the receiver confirmed, which makes the
+  receiver resume or say where it is. The ZEOF timeout also starts once the data has left the
+  queue, not when it was queued.
 - The app could crash just after a ZMODEM transfer ended, most often with raw-byte tracing at
   high baud rates: the trace file was closed with a `sync` onto the queue that was releasing it.
   The session log had the same flaw.

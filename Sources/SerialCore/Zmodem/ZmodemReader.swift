@@ -124,7 +124,7 @@ final class ZReader {
             } catch ZmodemError.timeout {
                 if !quiet, let trace {
                     trace.timeouts += 1
-                    trace.note("timeout: nothing received for \(timeout)s while waiting for \(waitingFor)")
+                    trace.note("timeout: nothing received for \(String(format: "%.1f", timeout)) s while waiting for \(waitingFor)")
                 }
                 throw ZmodemError.timeout
             }

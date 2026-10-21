@@ -179,6 +179,44 @@ final class PatternMangler: @unchecked Sendable {
     }
 }
 
+/// Removes the nth occurrence of a header (its first bytes given by `pattern`) and the
+/// `length - pattern.count` bytes after it, e.g. to lose one ZRPOS on the back channel.
+final class HeaderDropper: @unchecked Sendable {
+    private let lock = NSLock()
+    private let pattern: [UInt8]
+    private let occurrence: Int
+    private let length: Int
+    private var recent: [UInt8] = []
+    private var found = 0
+    private var dropping = 0
+
+    init(_ pattern: [UInt8], occurrence: Int, length: Int) {
+        self.pattern = pattern
+        self.occurrence = occurrence
+        self.length = length
+    }
+
+    func apply(_ data: Data) -> Data {
+        lock.withLock {
+            var out = Data()
+            for b in data {
+                if dropping > 0 { dropping -= 1; continue }
+                out.append(b)
+                recent.append(b)
+                if recent.count > pattern.count { recent.removeFirst() }
+                if recent == pattern {
+                    found += 1
+                    if found == occurrence {
+                        out.removeLast(pattern.count)
+                        dropping = length - pattern.count
+                    }
+                }
+            }
+            return out
+        }
+    }
+}
+
 func occurrences(of needle: Data, in haystack: Data) -> Int {
     var count = 0
     var from = haystack.startIndex
@@ -341,6 +379,39 @@ struct ZmodemNativeTransferTests {
         #expect(results.all.allSatisfy { $0.0 }, "\(results.all)")
         try expectSame(files, in: dst)
         #expect(logs.all.contains { $0.contains("no reply to ZEOF after an ignored ZRPOS") })
+    }
+
+    /// What a Slocum glider does at 921600 baud: it loses data, asks for a resend, loses data
+    /// again, and then goes quiet (here its second ZRPOS is lost). Repeating ZEOF gets nowhere,
+    /// since the receiver is waiting for data; resending from the last confirmed position does.
+    @Test func recoversWhenTheReceiverGoesQuietAfterAnError() throws {
+        let src = try tempDir(), dst = try tempDir()
+        let files = try makeFiles(in: src, sizes: [50_000])
+        var senderOptions = ZmodemOptions(), receiverOptions = ZmodemOptions()
+        senderOptions.timeout = 0.3
+        receiverOptions.timeout = 60  // the receiver never asks again by itself within the test
+        let sender = ZmodemTransfer(kind: .zmodemSend(files), directory: dst, options: senderOptions)
+        let receiver = ZmodemTransfer(kind: .zmodemReceive, directory: dst, options: receiverOptions)
+        var e = ZEncoder()
+        let zdata = Array(e.binaryHeader(ZHeader(.data, position: 0), crc32: true).prefix(4))
+        let firstError = Mangler(flipAt: [5_000])
+        let afterRewind = PatternMangler(after: zdata, occurrence: 2, distance: 3_000)
+        // ZRPOS headers from the receiver: 1st accepts the file, 2nd reports the first error,
+        // 3rd reports the damage after the rewind. Lose the 3rd. (Hex header: 21 bytes with XON.)
+        let lostZRPOS = HeaderDropper(Array("**\u{18}B09".utf8), occurrence: 3, length: 21)
+        sender.onOutput = { receiver.feed(afterRewind.apply(firstError.apply($0))) }
+        receiver.onOutput = { sender.feed(lostZRPOS.apply($0)) }
+        let logs = Inbox<String>()
+        sender.onLog = { logs.add($0) }
+        let results = Inbox<(Bool, String)>()
+        sender.onFinish = { results.add(($0, $1)) }
+        receiver.onFinish = { results.add(($0, $1)) }
+        try receiver.start()
+        try sender.start()
+        #expect(results.wait(timeout: 30) { $0.count == 2 })
+        #expect(logs.all.contains { $0.contains("resending from the last confirmed position") }, "the scenario didn't happen: \(logs.all)")
+        #expect(results.all.allSatisfy { $0.0 }, "\(results.all)")
+        try expectSame(files, in: dst)
     }
 
     /// A ZEOF for data the receiver doesn't have yet is ignored, but it mustn't restart the
