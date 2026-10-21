@@ -24,6 +24,9 @@ final class ZmodemReceiver {
 
     /// The file being written, removed if the transfer fails part way.
     private var partial: URL?
+    /// Files offered so far in this session, and their announced bytes, for batch progress.
+    private var offeredFiles = 0
+    private var offeredBytes = 0
 
     func run() throws -> Result {
         var result = Result()
@@ -107,6 +110,11 @@ final class ZmodemReceiver {
     /// Returns the saved file, or nil if it was skipped.
     private func receiveFile(info: [UInt8]) throws -> URL? {
         let meta = FileInfo(info)
+        // "Files left" and "bytes left" count this file too.
+        offeredFiles += 1
+        link.fileNumber = (offeredFiles, meta.filesLeft.map { offeredFiles - 1 + $0 })
+        link.batchBytes = meta.bytesLeft.map { (offeredBytes, offeredBytes + $0) }
+        offeredBytes += meta.size ?? 0
         link.trace?.line(.rx, "  file \"\(meta.name)\" fields \"\(meta.rawFields)\" → size \(meta.size.map(String.init) ?? "?"), "
             + "mtime \(meta.modified.map { "\($0)" } ?? "none"), mode \(meta.mode.map { String($0, radix: 8) } ?? "?")")
         let url = Self.uniqueURL(in: directory, for: meta.name)
@@ -217,6 +225,7 @@ final class ZmodemReceiver {
                     try? fm.setAttributes([.modificationDate: mtime], ofItemAtPath: url.path)
                 }
                 partial = nil
+                link.fileFinished()
                 link.progress("Received", url.lastPathComponent, offset, meta.size, force: true)
                 link.log("Received \(url.lastPathComponent) (\(offset) bytes)")
                 return url
@@ -244,6 +253,10 @@ final class ZmodemReceiver {
         var size: Int?
         var modified: Date?
         var mode: Int?
+        /// Files and bytes still to come in the batch, this file included (optional; lrzsz and the
+        /// Slocum send them).
+        var filesLeft: Int?
+        var bytesLeft: Int?
         /// Everything after the name, as sent, for diagnostics.
         var rawFields = ""
 
@@ -257,6 +270,8 @@ final class ZmodemReceiver {
                 modified = Date(timeIntervalSince1970: TimeInterval(t))
             }
             if fields.count > 2 { mode = Int(fields[2], radix: 8) }
+            if fields.count > 4, let n = Int(fields[4]), n > 0 { filesLeft = n }
+            if fields.count > 5, let n = Int(fields[5]), n > 0 { bytesLeft = n }
         }
     }
 

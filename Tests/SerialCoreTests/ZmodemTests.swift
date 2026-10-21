@@ -102,6 +102,14 @@ struct ZmodemCodecTests {
         #expect(info.name == "hello.txt")
         #expect(info.size == 1234)
         #expect(info.modified == Date(timeIntervalSince1970: TimeInterval(Int("14706755200", radix: 8)!)))
+        #expect(info.filesLeft == 1)
+        // The Slocum's first offer in a 10-file batch.
+        let slocum = ZmodemReceiver.FileInfo(Array("02460481.dbd".utf8) + [0] + Array("12659 15244214362 0 0 10 2812909".utf8) + [0])
+        #expect(slocum.filesLeft == 10)
+        #expect(slocum.bytesLeft == 2_812_909)
+        // Senders may stop after the size, or send 0 for "unknown".
+        #expect(ZmodemReceiver.FileInfo(Array("a".utf8) + [0] + Array("5".utf8) + [0]).filesLeft == nil)
+        #expect(ZmodemReceiver.FileInfo(Array("a".utf8) + [0] + Array("5 0 0 0 0 0".utf8) + [0]).filesLeft == nil)
     }
 }
 
@@ -398,6 +406,67 @@ struct ZmodemNativeTransferTests {
         #expect(results.all.contains { $0.0 == "receive" && $0.2 == "Cancelled" })
         #expect(results.all.contains { $0.0 == "send" && $0.2 == "Cancelled by the remote" })
         #expect(try FileManager.default.contentsOfDirectory(atPath: dst.path).isEmpty)
+    }
+
+    @Test func progressCountsFilesInTheBatch() throws {
+        let src = try tempDir(), dst = try tempDir()
+        let files = try makeFiles(in: src, sizes: [3000, 10, 5000])
+        let sender = ZmodemTransfer(kind: .zmodemSend(files), directory: dst)
+        let receiver = ZmodemTransfer(kind: .zmodemReceive, directory: dst)
+        sender.onOutput = { receiver.feed($0) }
+        receiver.onOutput = { sender.feed($0) }
+        let results = Inbox<Bool>()
+        sender.onFinish = { ok, _ in results.add(ok) }
+        receiver.onFinish = { ok, _ in results.add(ok) }
+        let sent = Inbox<String>(), received = Inbox<String>()
+        sender.onStatus = { sent.add($0) }
+        receiver.onStatus = { received.add($0) }
+
+        try receiver.start()
+        try sender.start()
+        #expect(results.wait(timeout: 10) { $0.count == 2 })
+        // 8010 bytes in all: file 1 ends at 37%, file 2 at 37% (10 bytes), file 3 at 100%.
+        let total = ZLink.size(8010)
+        for (lines, verb) in [(received.all, "Received"), (sent.all, "Sent")] {
+            for (i, percent) in [(1, 37), (2, 37), (3, 100)] {
+                let prefix = "\(i)/3, \(percent)% of \(total) · \(verb) file\(i - 1).bin"
+                #expect(lines.contains { $0.hasPrefix(prefix) }, "\(prefix) in \(lines)")
+            }
+        }
+    }
+
+    @Test func timeLeftAppearsOnASlowLink() throws {
+        let src = try tempDir(), dst = try tempDir()
+        let files = try makeFiles(in: src, sizes: [150_000, 150_000, 150_000])
+        let sender = ZmodemTransfer(kind: .zmodemSend(files), directory: dst)
+        let receiver = ZmodemTransfer(kind: .zmodemReceive, directory: dst)
+        // About 150 KB/s, so the batch takes a few seconds.
+        sender.onOutput = { usleep(UInt32($0.count) * 6); receiver.feed($0) }
+        receiver.onOutput = { sender.feed($0) }
+        let results = Inbox<Bool>()
+        sender.onFinish = { ok, _ in results.add(ok) }
+        receiver.onFinish = { ok, _ in results.add(ok) }
+        let received = Inbox<String>()
+        receiver.onStatus = { received.add($0) }
+        try receiver.start()
+        try sender.start()
+        #expect(results.wait(timeout: 30) { $0.count == 2 })
+        #expect(results.all.allSatisfy { $0 })
+        let estimates = received.all.filter { $0.contains(" left · ") }
+        #expect(!estimates.isEmpty, "no time-left estimate in \(received.all.suffix(5))")
+        // Never shown once nothing is left.
+        #expect(!received.all.contains { $0.hasPrefix("3/3, 100%") && $0.contains(" left") })
+    }
+
+    @Test func timeLeft() {
+        // The 10-file Slocum batch after its first file: 2.8 MB to go at 40 KB/s, 9 files to
+        // start, 0.9 s between files.
+        let t = ZLink.estimate(bytesLeft: 2_800_250, rate: 40_000, filesAfter: 9, gap: 0.9)
+        #expect(abs(t - 78.1) < 0.1)
+        #expect(ZLink.duration(t) == "1 min 18 s")
+        #expect(ZLink.duration(0.2) == "1 s")
+        #expect(ZLink.duration(44.6) == "45 s")
+        #expect(ZLink.duration(3725) == "1 h 02 min")
     }
 
     @Test func senderGivesUpWithoutReceiver() throws {

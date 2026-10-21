@@ -111,18 +111,61 @@ final class ZLink {
 
     func status(_ text: String) { status(text) }
 
+    /// Which file of the batch is being transferred (1-based) and how many there are, if known.
+    var fileNumber: (index: Int, count: Int?)?
+    /// Bytes of the batch in files before this one, and in the whole batch, if known.
+    var batchBytes: (before: Int, total: Int)?
+
+    // Measured over the whole session, for the time-left estimate: file data moved and the time
+    // spent moving it, and the gaps between one file's last data and the next file's first.
+    // Nothing is assumed about the remote; the estimate adapts to whatever it does.
+    private var dataBytes = 0
+    private var dataTime: TimeInterval = 0
+    private var lastDone = 0
+    private var lastDataAt = Date()
+    private var fileActive = false
+    private var lastFileEnd: Date?
+    private var gaps: [TimeInterval] = []
+
+    /// Called when a file's data starts, and again from `offset` after a rewind.
     func startFile(at offset: Int) {
-        rateStart = Date()
+        let now = Date()
+        if !fileActive, let end = lastFileEnd { gaps.append(now.timeIntervalSince(end)) }
+        fileActive = true
+        rateStart = now
         rateBase = offset
+        lastDone = offset
+        lastDataAt = now
         lastProgress = .distantPast
     }
 
-    /// Throttled progress line: "name  45056 / 100000 (45%)  1.2 MB/s".
+    /// Called when a file's data is complete.
+    func fileFinished() {
+        if fileActive { lastFileEnd = lastDataAt }
+        fileActive = false
+    }
+
+    /// Throttled progress line:
+    /// "3/10, 37% of 2.8 MB, ~45 s left · Receiving name  45 KB / 100 KB (45%)  40 KB/s".
     func progress(_ verb: String, _ name: String, _ done: Int, _ total: Int?, force: Bool = false) {
         let now = Date()
+        if fileActive, done > lastDone {
+            dataBytes += done - lastDone
+            dataTime += now.timeIntervalSince(lastDataAt)
+            lastDone = done
+            lastDataAt = now
+        }
         guard force || now.timeIntervalSince(lastProgress) >= 0.1 else { return }
         lastProgress = now
         var line = "\(verb) \(name)  \(Self.size(done))"
+        var batch: [String] = []
+        if let n = fileNumber { batch.append("\(n.index)/\(n.count.map(String.init) ?? "?")") }
+        if let b = batchBytes, b.total > 0 {
+            let percent = min(100, (b.before + done) * 100 / b.total)
+            batch.append("\(percent)% of \(Self.size(b.total))")
+        }
+        if let left = timeLeft(done: done, total: total) { batch.append("~\(Self.duration(left)) left") }
+        if !batch.isEmpty { line = batch.joined(separator: ", ") + " · " + line }
         if let total, total > 0 {
             line += " / \(Self.size(total)) (\(done * 100 / total)%)"
         }
@@ -131,6 +174,38 @@ final class ZLink {
             line += "  \(Self.size(Int(Double(done - rateBase) / elapsed)))/s"
         }
         status(line)
+    }
+
+    /// Bytes left over the measured data rate, plus the average gap between files for each file
+    /// still to start. Nil until there's a second of data to measure, or when nothing is left.
+    private func timeLeft(done: Int, total: Int?) -> TimeInterval? {
+        guard dataTime >= 1, dataBytes > 0 else { return nil }
+        var bytesLeft: Int
+        var filesAfter = 0
+        if let b = batchBytes {
+            bytesLeft = b.total - b.before - done
+            if let n = fileNumber, let count = n.count { filesAfter = max(0, count - n.index) }
+        } else if let total {
+            bytesLeft = total - done
+        } else {
+            return nil
+        }
+        bytesLeft = max(0, bytesLeft)
+        guard bytesLeft > 0 || filesAfter > 0 else { return nil }
+        let gap = gaps.isEmpty ? 0 : gaps.reduce(0, +) / Double(gaps.count)
+        return Self.estimate(bytesLeft: bytesLeft, rate: Double(dataBytes) / dataTime, filesAfter: filesAfter, gap: gap)
+    }
+
+    static func estimate(bytesLeft: Int, rate: Double, filesAfter: Int, gap: TimeInterval) -> TimeInterval {
+        Double(bytesLeft) / rate + Double(filesAfter) * gap
+    }
+
+    /// "45 s", "3 min 05 s", "1 h 02 min".
+    static func duration(_ t: TimeInterval) -> String {
+        let s = max(1, Int(t.rounded()))
+        if s < 60 { return "\(s) s" }
+        if s < 3600 { return String(format: "%d min %02d s", s / 60, s % 60) }
+        return String(format: "%d h %02d min", s / 3600, s % 3600 / 60)
     }
 
     static func size(_ n: Int) -> String {
@@ -165,8 +240,11 @@ final class ZmodemSender {
 
         var result = Result()
         for (i, url) in files.enumerated() {
+            link.fileNumber = (i + 1, files.count)
             let remaining = files[(i + 1)...]
             let totalLeft = remaining.reduce(0) { $0 + ((try? Self.size(of: $1)) ?? 0) }
+            let before = files[..<i].reduce(0) { $0 + ((try? Self.size(of: $1)) ?? 0) }
+            link.batchBytes = (before, before + ((try? Self.size(of: url)) ?? 0) + totalLeft)
             switch try sendFile(url, filesLeft: remaining.count + 1, bytesLeft: totalLeft) {
             case let .sent(bytes):
                 result.sent.append(url.lastPathComponent)
@@ -450,6 +528,7 @@ final class ZmodemSender {
                     guard let h else { continue eof }
                     switch h.frame {
                     case .rinit:
+                        link.fileFinished()
                         link.progress("Sent", name, data.count, data.count, force: true)
                         link.log("Sent \(name)")
                         return .sent(data.count)

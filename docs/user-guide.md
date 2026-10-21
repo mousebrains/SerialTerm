@@ -104,7 +104,14 @@ If the window is narrow, macOS moves some toolbar items behind a `»` button.
 
 **Status bar**:
 - connection state and line settings, such as `115200 8N1`;
-- transfer progress (file, bytes, percent, rate) with a **Cancel** button;
+- transfer progress with a **Cancel** button. For a batch: which file of how many, the percentage
+  of all the batch's bytes, and an estimate of the time left; then the current file's name,
+  bytes, percent and rate, e.g.
+  `3/10, 37% of 2.8 MB, ~45 s left · Receiving 02460483.dbd  9 KB / 12 KB (75%)  40 KB/s`.
+  When receiving, the file count and batch size come from the sender (lrzsz and Slocum gliders
+  send them; `3/?` means the sender didn't). The time left is measured as the batch goes: the
+  data rate so far, plus the average pause the remote takes between files, so it suits any
+  device;
 - paced typing still to send, with a **Cancel** button, and the pace when it is on;
 - the current log file (click to show it in Finder);
 - `⌫ = ^H` when the Backspace key sends Ctrl-H;
