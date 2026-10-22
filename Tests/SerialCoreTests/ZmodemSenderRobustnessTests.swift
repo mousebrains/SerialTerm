@@ -521,4 +521,13 @@ struct ZmodemSenderRobustnessTests {
         #expect(try file.crc32(ofFirst: data.count) == CRC.crc32(data))
         #expect(throws: ZmodemError.self) { try SendFile(src.appendingPathComponent("missing")) }
     }
+
+    /// A back-channel header was given 0.5 s to arrive, less than one takes below about 440 baud;
+    /// the rest of it then counted as noise and the receiver's request was lost.
+    @Test func backChannelWaitFollowsTheLineRate() {
+        #expect(ZmodemSender.headerWait(rate: nil) == 0.5)
+        #expect(ZmodemSender.headerWait(rate: 100_000) == 0.5)
+        #expect(abs(ZmodemSender.headerWait(rate: 30) - 3.2) < 0.001)  // 300 baud
+        #expect(ZmodemSender.headerWait(rate: 1) == 5)
+    }
 }

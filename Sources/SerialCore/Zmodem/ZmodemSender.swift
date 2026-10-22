@@ -689,6 +689,14 @@ final class ZmodemSender {
         }
     }
 
+    /// How long to wait for the rest of a back-channel header: about three headers' worth at `rate`
+    /// (a hex header is ~20 bytes, 0.7 s at 300 baud), at least 0.5 s. `rate` is the file data moved
+    /// a second, which matches the line once the port's queue is full; early on it includes filling
+    /// that queue, so a slow line gets the minimum until the measurement catches up.
+    static func headerWait(rate: Double?) -> TimeInterval {
+        min(5, max(0.5, 3 * 32 / (rate ?? .infinity)))
+    }
+
     /// A header from the back channel if one is (being) received; nil if only noise is pending.
     /// A lone pad or CAN from line noise is skipped: waiting long for the rest of a "header" that
     /// never comes used to time out and fail the whole transfer.
@@ -705,7 +713,7 @@ final class ZmodemSender {
             if b & 0x7F == Z.pad || b == Z.can {
                 reader.unread()
                 do {
-                    return try reader.readHeader(timeout: 0.5, garbageLimit: 32)
+                    return try reader.readHeader(timeout: Self.headerWait(rate: link.dataRate), garbageLimit: 32)
                 } catch ZmodemError.timeout {
                     link.trace?.note("back channel: incomplete header")
                     return nil
