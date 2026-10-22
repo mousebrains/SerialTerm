@@ -67,7 +67,7 @@ Sources/SerialTerm/
 | Thread / queue | Work |
 |---|---|
 | Main | UI, `TerminalModel`, feeding SwiftTerm, file pickers |
-| `SerialPort.read` | Reads the port; `Session` routing; logging; ZMODEM detection |
+| `SerialPort.read` | Reads the port; `Session` routing; ZMODEM detection; hands data to the log (escaped on the logger's queue) |
 | `SerialPort.write` | Writes in order; waits on `poll(POLLOUT)` when the driver is full |
 | `ZMODEM` (one `Thread` per transfer) | Runs the sender or receiver as blocking, sequential code |
 | `SessionLogger`, `ZmodemTrace` | Serial queues for file writes |
@@ -106,7 +106,14 @@ cancel. `discardPendingWrites` drops queued writes, stops the one in progress, a
 driver (`TCOFLUSH`).
 
 **Closing**: `Session.close()` cancels a running transfer, sends the abort sequence and waits up
-to a second for it to go out before closing the port, so neither end carries on alone.
+to a second for it to go out before closing the port, so neither end carries on alone. A window
+disconnecting mid-transfer uses `closeInBackground`, so the main thread isn't held up; reopening
+that port, or quitting, waits for the close to finish. A failed write closes the port with the
+error, as a failed read does. The port is opened with `O_CLOEXEC`.
+
+**Sending files**: the ZMODEM sender reads each file through its own descriptor (`SendFile`, with
+a 64 KB cache) rather than mapping it: touching a mapped file whose volume has gone raises
+SIGBUS. A file that gets shorter during the send fails it.
 
 ## Session routing
 
@@ -116,7 +123,9 @@ to a second for it to go out before closing the port, so neither end carries on 
    logs its own events.
 2. Otherwise the bytes are logged as `RX`, then scanned by `ZmodemDetector`:
    - `ZRQINIT` → display the bytes before the header, then start a ZMODEM receive with the header
-     bytes passed on (`prime`), so the receiver parses and traces the remote's opening frame;
+     bytes passed on (`prime`), so the receiver parses and traces the remote's opening frame. A
+     header split across reads is rebuilt from the detector's prefix (its first part was already
+     displayed);
    - `ZRINIT` → emit `.remoteWaitingForFiles`; the UI shows a file picker;
    - nothing → display.
 

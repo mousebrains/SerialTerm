@@ -54,7 +54,8 @@ arrives within *Give up waiting after* (1 s by default), the character is sent a
 status bar shows **No echo**, so a device with echo off is slowed down but never stuck. The speed
 limit and line pause still apply, counted from each echo. The echo must arrive first, within
 the next few dozen bytes from the device; the same character further on in its output doesn't
-count. While text is waiting, the status bar shows how much is left and a **Cancel** button; the
+count. The first character after a line end may come back after the device's answer to the line
+(its output and the next prompt), within its next 1024 bytes. While text is waiting, the status bar shows how much is left and a **Cancel** button; the
 status bar also shows the pace whenever it is on. Keys you type meanwhile, Ctrl-C included, queue
 behind the text, so use **Cancel** to stop a long paste. Cancel also ends the wait for an echo,
 so the next key goes out at once.

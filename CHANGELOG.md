@@ -150,6 +150,28 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
     the package cache is keyed by Xcode version.
   - CI runs the threaded suites under Thread Sanitizer. A hardware test for receiving with native
     ZMODEM was added, and the hardware send test now compares MD5s itself.
+- Found in a second review ([#9](https://github.com/mousebrains/SerialTerm/issues/9)), core:
+  - An XMODEM send typed the file name at the device's shell with only `'` escaped: a newline in
+    the name ended the `rx` command and ran the rest. Only printable ASCII is typed now; anything
+    else becomes `_` (the log notes it).
+  - Files received through lrzsz (YMODEM, XMODEM, the lrzsz ZMODEM option) weren't marked as
+    downloaded; they are now quarantined like the built-in receiver's.
+  - A ZMODEM send mapped the file into memory, so a file on a volume that went away (USB stick
+    pulled, share dropped) crashed the app with SIGBUS. Files are now read as they go; one that
+    gets shorter meanwhile fails the send.
+  - Disconnecting mid-transfer could hold up the window for up to 2 s; it now closes in the
+    background.
+  - A failed write (device gone) left the port open with every write failing; it now closes the
+    port and reports the error.
+  - Session logging escaped binary data on the serial read queue at ~3 MB/s; it now escapes on
+    the logger's queue at ~78 MB/s.
+  - With *Wait for each character's echo*, the first character of each line waited out the echo
+    timeout when the device's output and prompt came to over 32 bytes before its echo.
+  - A `ZRQINIT` split across reads lost the read that completed it (the trace didn't show the
+    opening frame).
+  - Smaller: the serial port's descriptor is no longer inherited by programs the app starts;
+    write and command waits use a clock that doesn't jump; on very slow lines (below ~440 baud)
+    the sender waits longer for the rest of a back-channel header.
 - ZMODEM send could stall for a minute and fail when the receiver lost data, asked for a resend,
   lost data again and went quiet (as Slocum gliders do at 921600 baud). After a ZEOF gets no
   reply the sender now resends from the last position the receiver confirmed, which makes the
