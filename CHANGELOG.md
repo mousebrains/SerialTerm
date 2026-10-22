@@ -78,6 +78,41 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
     automatic starts now pause for 30 s after three quick failures.
   - Data races on the session's settings (found with Thread Sanitizer) and the trace's counters,
     and a race that could send serial I/O to a reused descriptor number after a close.
+- Review (#4), ZMODEM:
+  - A sender could crash the app with huge numbers in a file offer (integer overflow); offer
+    fields are now clamped and the progress maths can't overflow.
+  - One stray `*` or CAN on the back channel aborted a send; it is now skipped.
+  - Cancel during a send took effect only at the end of the file, and never while flow control
+    held the line; it now takes effect within a subpacket.
+  - The send's limit of 30 rewinds per file counted rewinds that made progress, so a receiver that
+    overruns after every burst (a Slocum glider at 921600) failed files needing more than about 15
+    recoveries. Now 30 in a row without progress, with an overall limit that grows with the file.
+  - After an unanswered ZEOF the sender resent from the receiver's last `ZRPOS`, usually 0 when
+    streaming: a whole extra copy, or three to a receiver that had gone. A `ZCRCQ` every 32 KB now
+    keeps the receiver's position current, and a late `ZRINIT` is accepted.
+  - The ZEOF, ZACK and file-offer waits could loop forever on replies that weren't timeouts
+    (`ZNAK`, `ZACK`, noise). This predates the stale-ZEOF fix below, which kept it.
+  - Up to 80 KB of queued file data went out after an abort, a remote cancel or a mid-stream
+    `ZSKIP`, into the remote's shell. It is now discarded.
+  - Windowed sends timed the `ZACK` wait from when the window was queued, so slow lines failed
+    with "Too many errors" and no line errors; and the sender overran receivers' advertised
+    buffers (more bytes between ACKs, and bigger subpackets, than the buffer).
+  - The receiver's wait for a file never ended while bytes kept arriving: a false automatic start
+    swallowed a streaming instrument's output and sent it ZRINITs, and a device echoing our ZRINIT
+    got another one, forever. It now gives up on noise and echoes, and shows what arrived.
+  - The receiver could be kept from asking for data again by fast stale ZEOFs, trickling noise or
+    headers it ignores; it now asks whenever no new data has come for the timeout.
+  - A timeout inside a file offer aborted the whole batch instead of answering `ZNAK`.
+  - The receiver's 50-errors-per-file budget didn't renew with progress, so long files on noisy
+    links failed.
+  - The remote's prompt right after a transfer was swallowed.
+  - File names: bidirectional overrides, zero-width and C1 control characters are removed, long
+    names are shortened instead of the file being skipped, files are created without ever
+    replacing one (even one another window just created), and received files are quarantined
+    like downloads. Names are escaped in logs and traces.
+  - The receive command (`rz`/`zr`) now goes at the typing pace; timeouts use a clock that doesn't
+    jump; files of 4 GiB or more are refused up front; and the duplicate-`ZRPOS` window is longer
+    on slow lines.
 - ZMODEM send could stall for a minute and fail when the receiver lost data, asked for a resend,
   lost data again and went quiet (as Slocum gliders do at 921600 baud). After a ZEOF gets no
   reply the sender now resends from the last position the receiver confirmed, which makes the

@@ -86,7 +86,16 @@ display can't flood the main queue.
 **The transfer thread model**: ZMODEM is written as straightforward blocking code, like lrzsz,
 rather than as a callback state machine. `ByteChannel` turns the serial input into a blocking
 read with a timeout (an `NSCondition`). `ZReader` adds a local buffer, one byte of push-back, and
-a history used for error snapshots. Cancelling wakes the reader, which then throws.
+a history used for error snapshots. Timeouts and deadlines use `Uptime` (system uptime), not
+`Date`, so a clock change can't stretch them. A reader deadline bounds a wait however steadily
+bytes arrive. Cancelling drops queued output and wakes the reader, which then throws; the sender
+also checks for a cancel between subpackets, since it reads only when input is waiting.
+
+**Leftover input**: when a ZMODEM transfer ends, `ZmodemTransfer` passes input it didn't use to
+`onLeftover`, and the session logs and displays it without scanning it for transfers. That is
+the remote's prompt after the transfer, or everything received if no file was ever offered (a
+false automatic start). Input arriving after the end goes the same way until the session has
+let go of the transfer.
 
 **Back-pressure**: senders call `waitForOutput(maxPending:)`. `SerialPort` counts bytes queued but
 not yet accepted by the driver, so a sender can keep the driver busy (a 64 KB backlog) without

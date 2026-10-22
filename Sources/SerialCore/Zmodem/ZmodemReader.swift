@@ -23,6 +23,12 @@ enum ZmodemError: Error, CustomStringConvertible, Equatable {
     }
 }
 
+/// Seconds on a clock that doesn't jump. Timeouts and deadlines use it rather than `Date`, which
+/// follows NTP and manual clock changes.
+enum Uptime {
+    static var now: TimeInterval { ProcessInfo.processInfo.systemUptime }
+}
+
 /// Thread-safe inbox: the serial side appends, the protocol thread blocks reading.
 final class ByteChannel: @unchecked Sendable {
     private let cond = NSCondition()
@@ -79,16 +85,27 @@ final class ByteChannel: @unchecked Sendable {
 
     /// Everything buffered, waiting up to `timeout` for at least one byte.
     func take(timeout: TimeInterval) throws -> [UInt8] {
-        let deadline = Date().addingTimeInterval(timeout)
+        let end = Uptime.now + timeout
         cond.lock()
         defer { cond.unlock() }
         while buffer.isEmpty && !cancelled {
-            if !cond.wait(until: deadline) { break }
+            let left = end - Uptime.now
+            if left <= 0 { break }
+            _ = cond.wait(until: Date(timeIntervalSinceNow: left))
         }
         if cancelled { throw ZmodemError.cancelled }
         if buffer.isEmpty { throw ZmodemError.timeout }
         let out = buffer
         buffer.removeAll(keepingCapacity: true)
+        return out
+    }
+
+    /// Everything buffered, without waiting.
+    func takeAll() -> [UInt8] {
+        cond.lock()
+        defer { cond.unlock() }
+        let out = buffer
+        buffer.removeAll()
         return out
     }
 }
@@ -110,6 +127,12 @@ final class ZReader {
     var trace: ZmodemTrace?
     /// What the protocol is waiting for, for timeout messages in the trace.
     var waitingFor = "data"
+    /// If set (an `Uptime` time), reads time out then at the latest, however steadily bytes
+    /// arrive: a remote trickling noise can't hold a wait open forever.
+    var deadline: TimeInterval?
+    /// Input consumed while capturing, up to `captureLimit` bytes; see `startCapture`.
+    private var capture: [UInt8]?
+    static let captureLimit = 128 * 1024
 
     init(_ channel: ByteChannel) {
         self.channel = channel
@@ -117,14 +140,26 @@ final class ZReader {
 
     var hasPendingInput: Bool { index < local.count || channel.hasInput }
 
+    /// The local side cancelled the transfer.
+    var isCancelled: Bool { channel.isCancelled }
+
     func byte(timeout: TimeInterval, quiet: Bool = false) throws -> UInt8 {
         if index >= local.count {
+            var wait = timeout
             do {
-                local = try channel.take(timeout: timeout)
+                if let deadline {
+                    // Strict, even if bytes are waiting: a steady stream of noise mustn't get past it.
+                    let left = deadline - Uptime.now
+                    guard left > 0 else { throw ZmodemError.timeout }
+                    wait = min(wait, left)
+                }
+                local = try channel.take(timeout: max(0, wait))
             } catch ZmodemError.timeout {
                 if !quiet, let trace {
                     trace.timeouts += 1
-                    trace.note("timeout: nothing received for \(String(format: "%.1f", timeout)) s while waiting for \(waitingFor)")
+                    trace.note(wait < timeout
+                        ? "timeout: deadline passed while waiting for \(waitingFor)"
+                        : "timeout: nothing received for \(String(format: "%.1f", timeout)) s while waiting for \(waitingFor)")
                 }
                 throw ZmodemError.timeout
             }
@@ -133,9 +168,34 @@ final class ZReader {
             history.append(contentsOf: local)
             historyEnd += local.count
             if history.count > Self.historyLimit * 2 { history.removeFirst(history.count - Self.historyLimit) }
+            if capture != nil, capture!.count < Self.captureLimit {
+                capture!.append(contentsOf: local.prefix(Self.captureLimit - capture!.count))
+            }
         }
         defer { index += 1 }
         return local[index]
+    }
+
+    /// Keeps a copy of the input from now on (up to `captureLimit`), so it can be handed back if
+    /// it turns out not to be a transfer at all.
+    func startCapture() {
+        capture = Array(local[index...])
+    }
+
+    func stopCapture() {
+        capture = nil
+    }
+
+    /// Input that wasn't used, for the terminal: everything since `startCapture` if
+    /// `includingCapture` and a capture is running, otherwise what was received but not consumed.
+    func takeLeftover(includingCapture: Bool) -> [UInt8] {
+        defer {
+            capture = nil
+            local.removeAll()
+            index = 0
+        }
+        if includingCapture, let capture { return capture + channel.takeAll() }
+        return Array(local[min(index, local.count)...]) + channel.takeAll()
     }
 
     /// Raw bytes for stream offsets `range`, as far as they're still in the history.

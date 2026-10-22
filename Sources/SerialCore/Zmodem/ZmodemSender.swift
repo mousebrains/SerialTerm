@@ -127,7 +127,7 @@ final class ZLink {
     private var lastFileEnd: Date?
     private var gaps: [TimeInterval] = []
 
-    /// Called when a file's data starts, and again from `offset` after a rewind.
+    /// Called when a file's data starts.
     func startFile(at offset: Int) {
         let now = Date()
         if !fileActive, let end = lastFileEnd { gaps.append(now.timeIntervalSince(end)) }
@@ -137,6 +137,18 @@ final class ZLink {
         lastDone = offset
         lastDataAt = now
         lastProgress = .distantPast
+    }
+
+    /// Called when the sender goes back to `offset`. Resent data counts as data moved (it crossed
+    /// the line), but the stall before the rewind doesn't count as time spent moving it.
+    func rewound(to offset: Int) {
+        lastDone = offset
+        lastDataAt = Date()
+    }
+
+    /// Data rate measured so far (bytes a second), once there's a second of it.
+    var dataRate: Double? {
+        dataTime >= 1 && dataBytes > 0 ? Double(dataBytes) / dataTime : nil
     }
 
     /// Called when a file's data is complete.
@@ -161,13 +173,14 @@ final class ZLink {
         var batch: [String] = []
         if let n = fileNumber { batch.append("\(n.index)/\(n.count.map(String.init) ?? "?")") }
         if let b = batchBytes, b.total > 0 {
-            let percent = min(100, (b.before + done) * 100 / b.total)
+            // In floating point: the totals come from the remote and may be huge.
+            let percent = Int(min(100, max(0, (Double(b.before) + Double(done)) * 100 / Double(b.total))))
             batch.append("\(percent)% of \(Self.size(b.total))")
         }
         if let left = timeLeft(done: done, total: total) { batch.append("~\(Self.duration(left)) left") }
         if !batch.isEmpty { line = batch.joined(separator: ", ") + " · " + line }
         if let total, total > 0 {
-            line += " / \(Self.size(total)) (\(done * 100 / total)%)"
+            line += " / \(Self.size(total)) (\(Int(min(100, max(0, Double(done) * 100 / Double(total)))))%)"
         }
         let elapsed = now.timeIntervalSince(rateStart)
         if elapsed > 0.2 {
@@ -202,7 +215,8 @@ final class ZLink {
 
     /// "45 s", "3 min 05 s", "1 h 02 min".
     static func duration(_ t: TimeInterval) -> String {
-        let s = max(1, Int(t.rounded()))
+        // Int(_:) traps on a value out of range, and the estimate's inputs come from the remote.
+        let s = t.isFinite ? Int(min(max(t.rounded(), 1), 359_999_999)) : 359_999_999
         if s < 60 { return "\(s) s" }
         if s < 3600 { return String(format: "%d min %02d s", s / 60, s % 60) }
         return String(format: "%d h %02d min", s / 3600, s % 3600 / 60)
@@ -223,13 +237,22 @@ final class ZmodemSender {
     private var useCRC32 = false
     /// Bytes between acknowledgements; 0 means stream continuously.
     private var window = 0
+    /// Data bytes per subpacket: the configured size, but never more than the receiver's buffer.
+    private var blockSize = 1024
+    /// While streaming, a ZCRCQ every this many bytes asks the receiver to confirm its position
+    /// (ZACK) without stopping, so a resend after a lost reply starts close to where it is.
+    static let confirmInterval = 32 * 1024
 
     private let receiveCommand: String
+    /// Types the receive command at the session's typing pace; nil sends it at once.
+    private let typeReceiveCommand: ((String) -> Void)?
 
-    init(link: ZLink, options: ZmodemOptions, receiveCommand: String = "rz") {
+    init(link: ZLink, options: ZmodemOptions, receiveCommand: String = "rz", typeReceiveCommand: ((String) -> Void)? = nil) {
         self.link = link
         self.options = options
         self.receiveCommand = receiveCommand
+        self.typeReceiveCommand = typeReceiveCommand
+        blockSize = max(32, options.blockSize)
     }
 
     struct Result {
@@ -239,6 +262,10 @@ final class ZmodemSender {
     }
 
     func run(files: [URL]) throws -> Result {
+        // ZMODEM positions are 32 bits; refuse before starting rather than fail 4 GB in.
+        for url in files where ((try? Self.size(of: url)) ?? 0) > Int(UInt32.max) {
+            throw ZmodemError.fileError("\(url.lastPathComponent) is larger than ZMODEM's 4 GiB limit")
+        }
         try handshake()
 
         var result = Result()
@@ -260,6 +287,10 @@ final class ZmodemSender {
         return result
     }
 
+    private func checkCancelled() throws {
+        if reader.isCancelled { throw ZmodemError.cancelled }
+    }
+
     // MARK: Session start and end
 
     private func handshake() throws {
@@ -267,7 +298,12 @@ final class ZmodemSender {
         // A receiver that is already running skips it as noise.
         if !receiveCommand.isEmpty {
             link.trace?.line(.tx, "\"\(receiveCommand)\\r\"")
-            link.send(receiveCommand + "\r")
+            if let typeReceiveCommand {
+                link.flush()
+                typeReceiveCommand(receiveCommand + "\r")
+            } else {
+                link.send(receiveCommand + "\r")
+            }
         }
         link.sendHex(ZHeader(.rqinit))
         reader.waitingFor = "ZRINIT from receiver"
@@ -299,14 +335,16 @@ final class ZmodemSender {
         window = buffer
         if window == 0 && (caps & Z.canOVIO == 0 || caps & Z.canFDX == 0) {
             // Receiver can't read while writing to disk, or is half duplex: wait for an ACK per block.
-            window = options.blockSize
+            window = blockSize
         }
         if options.window > 0 {
             window = window == 0 ? options.window : min(window, options.window)
         }
+        // A subpacket must fit in the receiver's buffer (as lrzsz does).
+        if buffer > 0 { blockSize = min(blockSize, buffer) }
         link.encoder.escapeControls = caps & Z.escCtl != 0 || options.escapeControls
         link.log("ZMODEM receiver: \(ZHeader.capabilities(caps)), buffer \(buffer); using CRC-\(useCRC32 ? 32 : 16), "
-            + "\(window == 0 ? "streaming" : "ACK every \(window) bytes"), block \(options.blockSize)"
+            + "\(window == 0 ? "streaming" : "ACK every \(window) bytes"), block \(blockSize)"
             + (link.encoder.escapeControls ? ", escaping control characters" : ""))
     }
 
@@ -356,10 +394,13 @@ final class ZmodemSender {
         link.log("Sending \(name) (\(data.count) bytes)")
         link.status("Offering \(name)")
 
-        // Offer the file until the receiver says where to start (or to skip it).
+        // Offer the file until the receiver says where to start (or to skip it). Each offer waits
+        // at most `timeout` for a useful reply, however much else arrives meanwhile.
         var start: Int?
         var tries = 0
+        var crcReplies = 0
         offer: while start == nil {
+            try checkCancelled()
             tries += 1
             if tries > 10 { throw ZmodemError.tooManyErrors("receiver did not accept \(name)") }
             if tries > 1 { link.trace?.note("offering \(name) again (attempt \(tries))") }
@@ -367,12 +408,11 @@ final class ZmodemSender {
             link.trace?.line(.tx, "  file \"\(name)\" \(fields)")
             link.sendSubpacket(Data(info), end: Z.crcW, crc32: useCRC32, payload: false)
             reader.waitingFor = "reply to ZFILE"
-            var waitBriefly = false
+            var deadline = Uptime.now + timeout
             while true {
                 let h: ZHeader?
                 do {
-                    // After a stray ZRINIT, give the real reply a moment before offering again.
-                    h = try reader.readHeader(timeout: waitBriefly ? 1 : timeout)
+                    h = try reader.readHeader(timeout: max(0.05, deadline - Uptime.now))
                 } catch ZmodemError.timeout {
                     continue offer
                 }
@@ -386,27 +426,36 @@ final class ZmodemSender {
                     return .skipped
                 case .crc:
                     // Receiver wants a CRC of the file (or its first N bytes) to decide about resuming.
+                    crcReplies += 1
+                    if crcReplies > 10 { throw ZmodemError.tooManyErrors("receiver kept asking for the CRC of \(name)") }
                     let n = h.position == 0 ? data.count : min(h.position, data.count)
                     link.sendHex(ZHeader(.crc, position: Int(CRC.crc32(data.prefix(n)))))
+                    deadline = Uptime.now + timeout
                 case .rinit:
-                    if waitBriefly { continue offer }
-                    waitBriefly = true
+                    // A stray ZRINIT (a repeat from before our offer): give the real reply a moment.
+                    deadline = min(deadline, Uptime.now + 1)
                 case .nak:
                     continue offer
                 case .abort, .ferr, .fin, .can:
                     throw ZmodemError.protocolError("Receiver refused \(name) (\(h.name))")
                 default:
-                    continue
+                    break
                 }
+                if Uptime.now >= deadline { continue offer }
             }
         }
 
         var pos = min(start ?? 0, data.count)
         if pos > 0 { link.log("Receiver asked to start \(name) at \(pos)") }
         link.startFile(at: pos)
+        // Rewinds since the receiver last confirmed new data: one stuck at a position fails the
+        // file after 30, but one that keeps making progress, however slowly (a Slocum glider
+        // overrunning after every burst), carries on, up to an overall limit that grows with the
+        // file. lrzsz likewise counts only repeats at the same position.
         var errors = 0
-        let blockSize = max(32, options.blockSize)
-        var lastRewind: (position: Int, time: Date)?
+        var rewinds = 0
+        let maxRewinds = 30 + data.count / 1024
+        var lastRewind: (position: Int, time: TimeInterval)?
         /// A ZRPOS taken for a duplicate since the last rewind; see the ZEOF wait.
         var ignoredPosition: Int?
         /// The receiver has said it has everything before this (its last ZRPOS or ZACK).
@@ -414,47 +463,82 @@ final class ZmodemSender {
         /// Times in a row a silent receiver was prodded by resending from `confirmed`, without it
         /// confirming anything further; see the ZEOF wait.
         var prods = 0
+        /// This file's ZEOF has gone out: from now on a ZRINIT means the receiver has it all.
+        var eofSent = false
 
         /// lrzsz's receiver repeats ZRPOS while it skips the data that was in flight. A repeat of
         /// the position we just rewound to is a duplicate; acting on it would inject another ZDATA
         /// header into the stream the receiver has resumed, and errors snowball. A repeat after
         /// a while (e.g. the receiver's timeout) is genuine. So is a quick repeat when the data
         /// right after the rewind was damaged too, which only shows when the receiver then
-        /// ignores our ZEOF.
+        /// ignores our ZEOF. "A while" is at least 2 s, longer on a slow line, where the data in
+        /// flight takes longer to drain.
         func isDuplicate(_ p: Int) -> Bool {
-            guard let last = lastRewind, last.position == p, Date().timeIntervalSince(last.time) < 2 else { return false }
+            let window = max(2, Double(8 * 1024) / (link.dataRate ?? .infinity))
+            guard let last = lastRewind, last.position == p, Uptime.now - last.time < window else { return false }
             link.log("Ignoring duplicate ZRPOS \(p) for \(name)")
             ignoredPosition = p
             return true
         }
 
-        func rewind(to p: Int, _ why: String) throws {
-            link.discardUnsent()
-            lastRewind = (p, Date())
-            ignoredPosition = nil
-            errors += 1
-            link.log("Resending \(name) from \(p) (\(why)); was at \(pos)")
-            if errors > 30 { throw ZmodemError.tooManyErrors("\(name): receiver kept rejecting data") }
-            guard p >= 0 && p <= data.count else { throw ZmodemError.protocolError("Receiver asked for invalid position \(p)") }
-            pos = p
-            if p > confirmed { prods = 0 }  // it's making progress, however slowly
+        /// The receiver reports having everything before `p`.
+        func confirm(_ p: Int) {
+            guard p <= data.count, p > confirmed else { return }
             confirmed = p
+            prods = 0
+            errors = 0
+        }
+
+        func rewind(to p: Int, _ why: String) throws {
+            guard p >= 0 && p <= data.count else { throw ZmodemError.protocolError("Receiver asked for invalid position \(p)") }
+            link.discardUnsent()
+            lastRewind = (p, Uptime.now)
+            ignoredPosition = nil
+            if p > confirmed {
+                // It's making progress, however slowly.
+                prods = 0
+                errors = 0
+            }
+            confirmed = p
+            errors += 1
+            rewinds += 1
+            link.log("Resending \(name) from \(p) (\(why)); was at \(pos)")
+            if errors > 30 || rewinds > maxRewinds { throw ZmodemError.tooManyErrors("\(name): receiver kept rejecting data") }
+            pos = p
+            link.rewound(to: p)
+        }
+
+        /// The receiver answered this file's ZEOF (perhaps a late or repeated answer).
+        func finished() -> FileOutcome {
+            link.discardUnsent()
+            link.fileFinished()
+            link.progress("Sent", name, data.count, data.count, force: true)
+            link.log("Sent \(name)")
+            return .sent(data.count)
         }
 
         stream: while true {
+            try checkCancelled()
             link.sendBinary(ZHeader(.data, position: pos), crc32: useCRC32)
             let streamStart = pos
             var sinceAck = 0
             var sinceDrain = 0
+            var sinceConfirm = 0
 
             while true {
-                let n = min(blockSize, data.count - pos)
+                try checkCancelled()
+                var n = min(blockSize, data.count - pos)
+                // Never more between acknowledgements than the window (the receiver's buffer).
+                if window > 0 { n = min(n, window - sinceAck) }
                 let last = pos + n >= data.count
                 let end: UInt8
                 if last {
                     end = Z.crcE
                 } else if window > 0 && sinceAck + n >= window {
                     end = Z.crcW
+                } else if window == 0 && sinceConfirm + n >= Self.confirmInterval {
+                    end = Z.crcQ
+                    sinceConfirm = -n
                 } else {
                     end = Z.crcG
                 }
@@ -463,39 +547,55 @@ final class ZmodemSender {
                 pos += n
                 sinceAck += n
                 sinceDrain += n
+                sinceConfirm += n
                 link.progress("Sending", name, pos, data.count)
 
                 // Keep the port busy, with a bounded queue so a ZRPOS takes effect quickly.
                 if sinceDrain >= ZLink.batchSize {
                     link.throttle()
                     sinceDrain = 0
+                    try checkCancelled()
                 }
 
                 if end == Z.crcW {
-                    // Wait for the receiver to empty its buffer.
+                    // Wait for the receiver to empty its buffer, timing its silence from when the
+                    // window has gone out, not from when it was queued: on a slow line that alone
+                    // can take longer than the timeout.
                     reader.waitingFor = "ZACK at \(pos)"
+                    link.waitForOutput()
+                    try checkCancelled()
+                    let deadline = Uptime.now + timeout
                     while true {
                         let h: ZHeader?
                         do {
-                            h = try reader.readHeader(timeout: timeout)
+                            h = try reader.readHeader(timeout: max(0.05, deadline - Uptime.now))
                         } catch ZmodemError.timeout {
                             try rewind(to: pos - sinceAck, "no ZACK")
                             continue stream
                         }
-                        guard let h else { continue }
-                        if h.frame == .ack {
-                            if h.position <= data.count, h.position > confirmed {
-                                confirmed = h.position
-                                prods = 0
+                        switch h?.frame {
+                        case .ack?:
+                            confirm(h!.position)
+                            continue stream
+                        case .rpos?:
+                            if !isDuplicate(h!.position) {
+                                try rewind(to: h!.position, "ZRPOS")
+                                continue stream
                             }
+                        case .skip?:
+                            link.discardUnsent()
+                            return .skipped
+                        case .rinit? where eofSent:
+                            return finished()
+                        case .abort?, .ferr?, .can?, .fin?:
+                            throw ZmodemError.protocolError("Receiver aborted (\(h!.name))")
+                        default:
+                            break
+                        }
+                        if Uptime.now >= deadline {
+                            try rewind(to: pos - sinceAck, "no ZACK")
                             continue stream
                         }
-                        if h.frame == .rpos {
-                            if isDuplicate(h.position) { continue }
-                            try rewind(to: h.position, "ZRPOS")
-                            continue stream
-                        }
-                        if h.frame == .skip { return .skipped }
                     }
                 }
 
@@ -507,7 +607,13 @@ final class ZmodemSender {
                         if isDuplicate(h.position) { continue }
                         try rewind(to: h.position, "receiver reported an error")
                         continue stream
+                    case .ack:
+                        confirm(h.position)
+                    case .rinit where eofSent:
+                        // Resending after a ZEOF whose answer was late: it has everything.
+                        return finished()
                     case .skip:
+                        link.discardUnsent()
                         return .skipped
                     case .abort, .ferr, .can:
                         throw ZmodemError.protocolError("Receiver aborted (\(h.name))")
@@ -522,20 +628,24 @@ final class ZmodemSender {
                 trace.line(.tx, "  data \(streamStart)..<\(pos) (\(pos - streamStart) bytes)")
             }
 
-            // End of file: the receiver answers ZRINIT once it has everything.
+            // End of file: the receiver answers ZRINIT once it has everything. At most 10 ZEOFs
+            // per attempt, whatever comes back.
             var eofTries = 0
             reader.waitingFor = "reply to ZEOF"
             eof: while true {
-                link.sendBinary(ZHeader(.eof, position: data.count), crc32: useCRC32)
                 eofTries += 1
+                if eofTries > 10 { throw ZmodemError.tooManyErrors("no reply to ZEOF") }
+                link.sendBinary(ZHeader(.eof, position: data.count), crc32: useCRC32)
+                eofSent = true
                 // Time the receiver's silence from when the data has left, not from when it was
                 // queued: at low baud rates the queue alone can take longer than the timeout.
                 link.waitForOutput()
-                let deadline = Date().addingTimeInterval(timeout)
+                try checkCancelled()
+                let deadline = Uptime.now + timeout
                 while true {
                     let h: ZHeader?
                     do {
-                        h = try reader.readHeader(timeout: max(0.05, deadline.timeIntervalSinceNow))
+                        h = try reader.readHeader(timeout: max(0.05, deadline - Uptime.now))
                     } catch ZmodemError.timeout {
                         // A receiver still waiting for data ignores ZEOF. If it's waiting at a
                         // position we ignored, that ZRPOS was genuine; without this, each side
@@ -548,43 +658,45 @@ final class ZmodemSender {
                         // gliders go quiet after an overrun) waits for data at a position we don't
                         // know, and ignores ZEOF. Resend from the last position it confirmed: if
                         // that's where it is, the data flows; if not, it answers with a ZRPOS
-                        // giving its position. Three tries without progress, so a receiver that
+                        // giving its position. The periodic ZCRCQ keeps `confirmed` close behind,
+                        // so this resends little. Three tries without progress, so a receiver that
                         // has gone for good still fails.
                         if prods < 3 {
                             prods += 1
                             try rewind(to: confirmed, "no reply to ZEOF; resending from the last confirmed position")
                             continue stream
                         }
-                        if eofTries > 10 { throw ZmodemError.tooManyErrors("no reply to ZEOF") }
                         continue eof
                     }
                     guard let h else { continue eof }
                     switch h.frame {
                     case .rinit:
-                        link.fileFinished()
-                        link.progress("Sent", name, data.count, data.count, force: true)
-                        link.log("Sent \(name)")
-                        return .sent(data.count)
+                        return finished()
                     case .rpos:
                         // A duplicate isn't a reply: keep waiting rather than repeating ZEOF.
-                        if isDuplicate(h.position) { continue }
-                        try rewind(to: h.position, "ZRPOS after ZEOF")
-                        continue stream
+                        if !isDuplicate(h.position) {
+                            try rewind(to: h.position, "ZRPOS after ZEOF")
+                            continue stream
+                        }
+                    case .ack:
+                        // A late answer to a ZCRCQ.
+                        confirm(h.position)
                     case .skip:
                         return .skipped
-                    case .ack:
-                        continue eof
                     case .abort, .ferr, .can:
                         throw ZmodemError.protocolError("Receiver aborted (\(h.name))")
                     default:
                         continue eof
                     }
+                    if Uptime.now >= deadline { continue eof }
                 }
             }
         }
     }
 
     /// A header from the back channel if one is (being) received; nil if only noise is pending.
+    /// A lone pad or CAN from line noise is skipped: waiting long for the rest of a "header" that
+    /// never comes used to time out and fail the whole transfer.
     private func pollHeader() throws -> ZHeader? {
         var noise: [UInt8] = []
         defer {
@@ -597,7 +709,12 @@ final class ZmodemSender {
             let b = try reader.byte(timeout: 0, quiet: true)
             if b & 0x7F == Z.pad || b == Z.can {
                 reader.unread()
-                return try reader.readHeader(timeout: 2, garbageLimit: 32)
+                do {
+                    return try reader.readHeader(timeout: 0.5, garbageLimit: 32)
+                } catch ZmodemError.timeout {
+                    link.trace?.note("back channel: incomplete header")
+                    return nil
+                }
             }
             noise.append(b)
         }

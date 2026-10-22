@@ -48,8 +48,8 @@ status bar also shows the pace whenever it is on. Keys you type meanwhile, Ctrl-
 behind the text, so use **Cancel** to stop a long paste. Cancel also ends the wait for an echo,
 so the next key goes out at once.
 
-The commands SerialTerm types to start a transfer on the device (`rb` and `rx name`) go out at the
-same pace.
+The commands SerialTerm types to start a transfer on the device (`rb`, `rx name`, and the ZMODEM
+receive command) go out at the same pace.
 
 **Several devices**: each window (**⌘N**) has its own port and line settings. New windows start
 with the settings used most recently.
@@ -199,8 +199,15 @@ overwritten.
 files into the download folder.
 - An existing file is never overwritten; the new copy is saved as `name (1).ext`.
 - Paths in the remote's file names are removed, so a file can't land outside the download folder.
+  Leading dots, control and invisible characters are removed too, and very long names shortened.
 - Each file keeps its original modification time.
+- Received files are marked as downloaded, as a browser marks them, so macOS asks before running a
+  received app or script.
 - If a transfer fails or is cancelled, the partly received file is deleted.
+- The device's prompt after the transfer appears in the terminal as usual.
+- If something that looked like the start of a transfer wasn't one (say, a listing of a file
+  that happens to contain a ZMODEM header), SerialTerm gives up within a few seconds and shows
+  what the device sent meanwhile.
 
 **Sending**, any of three ways:
 - Run `rz` on the device. SerialTerm detects it and opens a file picker; ⌘-click to choose
@@ -208,7 +215,8 @@ files into the download folder.
 - At the device's shell prompt, choose **Transfer ▸ ZMODEM ▸ Send Files…**. SerialTerm types
   the device's receive command for you: `rz` by default, or what *ZMODEM send starts receiver
   with* under the slider button says (`zr` for Slocum gliders, or nothing). It is harmless if
-  the receiver is already running, and it can be part of a preset.
+  the receiver is already running, it goes at the typing pace if paced typing is on, and it can
+  be part of a preset.
 - Drop files onto the terminal window.
 
 **Progress** appears in the status bar. **Cancel** (status bar or Transfer menu) stops both ends.
