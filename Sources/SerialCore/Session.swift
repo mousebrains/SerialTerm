@@ -108,11 +108,12 @@ public final class Session: @unchecked Sendable {
     private var cancelRequested = false
     /// After cancelling an XMODEM/YMODEM transfer: until when to watch for a remote receiver that
     /// missed the abort, and how many more aborts may be sent.
-    private var cancelWatchUntil: Date?
+    private var cancelWatchUntil: TimeInterval?
     private var cancelRetries = 0
-    /// Recent failed automatic starts, and until when automatic starts are paused after too many.
-    private var automaticFailures: [Date] = []
-    private var automaticPausedUntil: Date?
+    /// Recent failed automatic starts, and until when automatic starts are paused after too many
+    /// (`Uptime` times, like the other deadlines here: they don't move with the clock).
+    private var automaticFailures: [TimeInterval] = []
+    private var automaticPausedUntil: TimeInterval?
     private static let nak: UInt8 = 0x15
     private let pacer = PacedSender()
     /// Types the receive commands the session sends for a transfer. Unlike `pacer`, its output
@@ -166,8 +167,8 @@ public final class Session: @unchecked Sendable {
             active.cancel()
             // The transfer sends the abort as it stops; give it a moment, and send one ourselves
             // if it doesn't finish in time.
-            let deadline = Date().addingTimeInterval(1)
-            while lock.withLock({ transfer === active }) && Date() < deadline { usleep(10_000) }
+            let deadline = Uptime.now + 1
+            while lock.withLock({ transfer === active }) && Uptime.now < deadline { usleep(10_000) }
             if lock.withLock({ transfer === active }) {
                 port.discardPendingWrites()
                 port.write(ExternalTransfer.abortSequence)
@@ -175,6 +176,16 @@ public final class Session: @unchecked Sendable {
             port.waitForPendingWrites(maxPending: 0, timeout: 1)
         }
         port.close()
+    }
+
+    /// `close` on a background queue, so the caller isn't held up while a running transfer stops
+    /// and the abort goes out (normally milliseconds; up to about 2 s with a stuck line). `done` is
+    /// called on that queue once the port is closed. The session stays alive until then.
+    public func closeInBackground(then done: (@Sendable () -> Void)? = nil) {
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            close()
+            done?()
+        }
     }
 
     deinit {
@@ -325,7 +336,11 @@ public final class Session: @unchecked Sendable {
         }
         // Only now that it's running: type the remote's receive command if asked. The sender
         // (lsx, lsb) waits for the receiver, so the command can follow it.
-        if startRemote, let command = ExternalTransfer.remoteReceiveCommand(for: kind) {
+        if startRemote, let command = kind.remoteReceiveCommand {
+            if case let .xmodemSend(url) = kind, case let typed = TransferKind.typeable(url.lastPathComponent),
+               typed != url.lastPathComponent {
+                logger?.note("\(url.lastPathComponent) typed as \(typed): a terminal line can't carry all its characters")
+            }
             logger?.log(.tx, Data(command.utf8))
             typeCommand(command, wait: false)
         }
@@ -360,10 +375,10 @@ public final class Session: @unchecked Sendable {
         commandDone.withLock { commandPending = data.count }
         commandPacer.send(data)
         guard wait else { return }
-        let deadline = Date().addingTimeInterval(30)
+        let deadline = Uptime.now + 30
         commandDone.lock()
-        while commandPending > 0 && Date() < deadline && !lock.withLock({ cancelRequested }) {
-            _ = commandDone.wait(until: min(deadline, Date().addingTimeInterval(0.1)))
+        while commandPending > 0 && Uptime.now < deadline && !lock.withLock({ cancelRequested }) {
+            _ = commandDone.wait(until: Date(timeIntervalSinceNow: min(0.1, max(0, deadline - Uptime.now))))
         }
         commandDone.unlock()
         port.waitForPendingWrites(maxPending: 0, timeout: 5)
@@ -381,7 +396,7 @@ public final class Session: @unchecked Sendable {
             if let t = transfer as? ExternalTransfer, t.kind.isBlockProtocol {
                 // X/YMODEM receivers only see CAN at a block boundary; one that got the abort
                 // mid-block treats it as a bad block and NAKs. Watch for that and abort again.
-                cancelWatchUntil = Date().addingTimeInterval(15)
+                cancelWatchUntil = Uptime.now + 15
                 cancelRetries = 4
             }
             if transfer != nil { cancelRequested = true }
@@ -395,15 +410,15 @@ public final class Session: @unchecked Sendable {
     /// stuck starting and aborting transfers can't restart one many times a second.
     private func automaticResult(success: Bool) {
         let paused: Bool = lock.withLock {
-            let now = Date()
+            let now = Uptime.now
             guard !success else {
                 automaticFailures.removeAll()
                 return false
             }
-            automaticFailures = automaticFailures.filter { now.timeIntervalSince($0) < 30 } + [now]
+            automaticFailures = automaticFailures.filter { now - $0 < 30 } + [now]
             guard automaticFailures.count >= 3 else { return false }
             automaticFailures.removeAll()
-            automaticPausedUntil = now.addingTimeInterval(30)
+            automaticPausedUntil = now + 30
             return true
         }
         guard paused else { return }
@@ -432,7 +447,7 @@ public final class Session: @unchecked Sendable {
 
     private func handleIncoming(_ data: Data) {
         let (active, logger, auto) = lock.withLock {
-            (transfer, self.logger, settings.autoZmodem && automaticPausedUntil.map { Date() >= $0 } ?? true)
+            (transfer, self.logger, settings.autoZmodem && automaticPausedUntil.map { Uptime.now >= $0 } ?? true)
         }
 
         if let active {
@@ -459,9 +474,11 @@ public final class Session: @unchecked Sendable {
         switch match.trigger {
         case .remoteSending:
             do {
-                // Hand over the opening frame (when it all arrived in this read) so the trace shows it.
-                let opening = data.count > match.headerStart && data[data.startIndex + match.headerStart] == Z.pad
-                    ? data.suffix(from: data.startIndex + match.headerStart) : nil
+                // Hand over the opening frame so the trace shows it. When it began in an earlier
+                // read, those bytes were shown already; rebuild them, as they can only be the prefix.
+                let opening = match.carried > 0
+                    ? Data(ZmodemDetector.prefix.prefix(match.carried)) + data
+                    : data.suffix(from: data.startIndex + match.headerStart)
                 try startTransfer(.zmodemReceive, primed: opening, startRemote: false, automatic: true)
             } catch {
                 logger?.note("Auto ZMODEM receive failed: \(error)")
@@ -482,7 +499,7 @@ public final class Session: @unchecked Sendable {
     private func abortAgainIfRemoteStillReceiving(_ data: Data) {
         let again: Bool = lock.withLock {
             guard let until = cancelWatchUntil else { return false }
-            guard Date() < until, cancelRetries > 0 else {
+            guard Uptime.now < until, cancelRetries > 0 else {
                 cancelWatchUntil = nil
                 return false
             }

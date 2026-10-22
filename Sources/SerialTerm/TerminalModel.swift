@@ -69,6 +69,9 @@ final class TerminalModel: ObservableObject {
 
     /// Open windows, for confirming before quitting during a transfer.
     private static let all = NSHashTable<TerminalModel>.weakObjects()
+    /// Ports closing in the background, by path (see `disconnect`). A port is held exclusively
+    /// until it has closed, so opening it again waits for that, and so does quitting.
+    private static var closing: [String: DispatchGroup] = [:]
 
     init(settings: AppSettings? = nil) {
         let settings = settings ?? .shared
@@ -94,6 +97,9 @@ final class TerminalModel: ObservableObject {
     /// At quit: close every port, so running transfers are cancelled and the devices told to stop.
     static func disconnectAll() {
         for model in all.allObjects { model.disconnect() }
+        let deadline = DispatchTime.now() + 3
+        for group in closing.values { _ = group.wait(timeout: deadline) }
+        closing.removeAll()
     }
 
     // MARK: Connection
@@ -134,6 +140,7 @@ final class TerminalModel: ObservableObject {
         }
         disconnect()
         restoreAllowed = false
+        if let closing = Self.closing.removeValue(forKey: path) { _ = closing.wait(timeout: .now() + 3) }
 
         let port = SerialPort(path: path, config: connection.config)
         let session = Session(port: port, downloadDirectory: prefs.downloadDirectory)
@@ -185,7 +192,16 @@ final class TerminalModel: ObservableObject {
         display.flushNow()
         if session != nil { banner("Disconnected") }
         session?.stopLogging()
-        session?.close()  // cancels a running transfer and tells the remote to stop
+        // Cancels a running transfer and tells the remote to stop. That can take a moment, so
+        // with a transfer running it happens in the background, without holding up the window.
+        if let session, session.isTransferring {
+            let closed = DispatchGroup()
+            closed.enter()
+            Self.closing[session.port.path] = closed
+            session.closeInBackground { closed.leave() }
+        } else {
+            session?.close()
+        }
         session = nil
         isConnected = false
         logURL = nil

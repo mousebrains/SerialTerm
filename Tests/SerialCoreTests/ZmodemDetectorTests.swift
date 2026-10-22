@@ -27,6 +27,15 @@ struct ZmodemDetectorTests {
         #expect(m?.trigger == .remoteSending)
         #expect(m?.headerStart == 0)
         #expect(m?.headerEnd == 3)
+        #expect(m?.carried == 3)
+    }
+
+    @Test func carriedCountsOnlyEarlierChunks() {
+        var d = ZmodemDetector()
+        #expect(d.scan(zrqinit)?.carried == 0)
+        d.reset()
+        #expect(d.scan(Data("*".utf8)) == nil)
+        #expect(d.scan(Data("*\u{18}B00".utf8))?.carried == 1)
     }
 
     @Test func extraLeadingAsterisks() {

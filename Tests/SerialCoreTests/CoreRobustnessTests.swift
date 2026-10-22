@@ -70,6 +70,19 @@ struct LogFileTests {
         #expect(failures.all.count == 1)
     }
 
+    /// Escaping used to run on the caller's queue (the serial read queue) and take ~22 ms per
+    /// 64 KB of binary data in release builds, holding up reads of a fast line.
+    @Test func loggingLeavesTheEscapingToTheLogger() throws {
+        let logger = try SessionLogger(url: try tempDir().appendingPathComponent("t.log"))
+        let chunk = Data((0..<1_000_000).map { UInt8(truncatingIfNeeded: $0 &* 7) })
+        let start = Date()
+        logger.log(.rx, chunk)
+        #expect(Date().timeIntervalSince(start) < 0.05)
+        logger.flush()
+        let line = try String(contentsOf: logger.url, encoding: .utf8)
+        #expect(line.hasSuffix(" RX " + SessionLogger.escape(chunk) + "\n"))
+    }
+
     /// Notes quote remote file names; a newline in one used to forge a log line.
     @Test func notesAreOneLine() {
         #expect(SessionLogger.escapeNote("a\n2026-10-21 12:00:00.000 RX forged") == "a\\n2026-10-21 12:00:00.000 RX forged")
@@ -150,6 +163,44 @@ struct SerialPortRobustnessTests {
         #expect(got < 200_000, "\(got) bytes still went out after the discard")
     }
 
+    /// Descriptors open on `path`.
+    private func descriptors(on path: String) -> Set<Int32> {
+        Set((0..<min(getdtablesize(), 4096)).filter { fd in
+            var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+            return fcntl(fd, F_GETPATH, &buffer) == 0 && String(cString: buffer) == path
+        })
+    }
+
+    /// The port's descriptor used to be inherited by programs the app starts (the lrzsz runner).
+    @Test func descriptorIsNotInherited() throws {
+        let pty = try PtyPair()
+        let before = descriptors(on: pty.slavePath)
+        let port = SerialPort(path: pty.slavePath, config: SerialConfig())
+        try port.open()
+        defer { port.close() }
+        let opened = descriptors(on: pty.slavePath).subtracting(before)
+        #expect(opened.count == 1)
+        for fd in opened { #expect(fcntl(fd, F_GETFD) & FD_CLOEXEC != 0) }
+    }
+
+    /// A write error (device gone, driver fault) used to be ignored: the port stayed open, with
+    /// every write failing and nothing telling the session, unless a read happened to notice.
+    @Test func writeErrorClosesThePort() throws {
+        let pty = try PtyPair()
+        let before = descriptors(on: pty.slavePath)
+        let port = SerialPort(path: pty.slavePath, config: SerialConfig())
+        let closed = Inbox<Error?>()
+        port.onClose = { closed.add($0) }
+        try port.open()
+        defer { port.close() }
+        let fd = try #require(descriptors(on: pty.slavePath).subtracting(before).first)
+        breakWrites(to: fd)  // replaces the descriptor, which also ends the read side's events
+        port.write(Data("x".utf8))
+        #expect(closed.wait(timeout: 2) { !$0.isEmpty })
+        #expect(!port.isOpen)
+        #expect(closed.all.first.map { $0 != nil } == true, "closed with an error")
+    }
+
     /// Waits on a line that isn't moving (flow control holding it) can time out or be stopped.
     @Test func waitsCanTimeOutOrStop() throws {
         let pty = try PtyPair()
@@ -173,8 +224,8 @@ struct ExternalTransferCommandTests {
         #expect(args.suffix(2) == ["--", "-ZZ.bin"])
         let (_, plain, _) = try ExternalTransfer.command(for: .xmodemReceive(URL(fileURLWithPath: "/tmp/ZZ.bin")))
         #expect(plain.last == "ZZ.bin" && !plain.contains("--"))
-        #expect(ExternalTransfer.remoteReceiveCommand(for: .xmodemSend(URL(fileURLWithPath: "/tmp/-x.bin"))) == "rx '--' '-x.bin'\r")
-        #expect(ExternalTransfer.remoteReceiveCommand(for: .xmodemSend(URL(fileURLWithPath: "/tmp/it's.bin"))) == "rx 'it'\\''s.bin'\r")
+        #expect(TransferKind.xmodemSend(URL(fileURLWithPath: "/tmp/-x.bin")).remoteReceiveCommand == "rx '--' '-x.bin'\r")
+        #expect(TransferKind.xmodemSend(URL(fileURLWithPath: "/tmp/it's.bin")).remoteReceiveCommand == "rx 'it'\\''s.bin'\r")
     }
 
     /// "\r\n" is one Character in Swift, so splitting on "\r" or "\n" kept CRLFs in messages.
@@ -255,6 +306,28 @@ struct SessionLifecycleTests {
         #expect(released == nil)
     }
 
+    /// Closing waited on the caller's thread (the main thread, from the window) for the transfer
+    /// to stop and the abort to go out; in the background, the caller goes on at once.
+    @Test func closeInBackgroundStillAbortsTheRemote() throws {
+        let pty = try PtyPair()
+        let dir = try tempDir()
+        let file = dir.appendingPathComponent("f.bin")
+        try Data(repeating: 1, count: 100_000).write(to: file)
+        let session = Session(port: SerialPort(path: pty.slavePath, config: SerialConfig()), downloadDirectory: dir)
+        try session.open()
+        try session.startTransfer(.zmodemSend([file]))  // nobody answers; the sender waits for ZRINIT
+        #expect(pty.readFromPort(timeout: 1).count > 0)
+        let closed = Inbox<Bool>()
+        let start = Date()
+        session.closeInBackground { closed.add(session.port.isOpen) }
+        #expect(Date().timeIntervalSince(start) < 0.05)
+        #expect(closed.wait(timeout: 5) { !$0.isEmpty })
+        #expect(closed.all == [false], "port closed before `done`")
+        #expect(!session.isTransferring)
+        let abort = Data(repeating: 0x18, count: 8) + Data(repeating: 0x08, count: 8)
+        #expect(pty.readFromPort(timeout: 1).range(of: abort) != nil, "abort sent before the port closed")
+    }
+
     /// A remote that keeps starting a transfer and aborting it used to restart a failing receive
     /// many times a second, with a beep each time.
     @Test func repeatedAutomaticFailuresPause() throws {
@@ -306,5 +379,7 @@ extension ZmodemEndToEndTests {
         let names = try FileManager.default.contentsOfDirectory(atPath: dst.path)
         #expect(names == ["hidden"], "\(names)")
         #expect(try Data(contentsOf: dst.appendingPathComponent("hidden")) == Data("dot file".utf8))
+        let values = try dst.appendingPathComponent("hidden").resourceValues(forKeys: [.quarantinePropertiesKey])
+        #expect(values.quarantineProperties?["LSQuarantineAgentName"] as? String == "SerialTerm", "marked as downloaded")
     }
 }

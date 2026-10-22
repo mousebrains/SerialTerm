@@ -61,4 +61,19 @@ struct ZmodemPerformanceTests {
         #expect(try Data(contentsOf: dst.appendingPathComponent("big.bin")) == Self.payload)
         #expect(rate > 15)
     }
+
+    /// Logging escapes what the device sends; binary data at 3 Mbaud is ~0.3 MB/s.
+    @Test func logEscapeThroughput() {
+        let chunk = Self.payload.prefix(65_536)
+        var times: [Double] = []
+        for _ in 0..<9 {
+            let start = Date()
+            _ = SessionLogger.escape(chunk)
+            times.append(Date().timeIntervalSince(start))
+        }
+        let median = times.sorted()[times.count / 2]
+        print("LOG ESCAPE: 64 KB random bytes, n=\(times.count), median \(String(format: "%.2f", median * 1000)) ms, "
+              + "range \(String(format: "%.2f", times.min()! * 1000))–\(String(format: "%.2f", times.max()! * 1000)) ms")
+        #expect(Double(chunk.count) / median / 1e6 > 10)
+    }
 }

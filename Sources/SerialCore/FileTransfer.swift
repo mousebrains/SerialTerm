@@ -38,6 +38,35 @@ public enum TransferKind: Sendable, Equatable {
     }
 }
 
+extension TransferKind {
+    /// The command to type at the remote's shell to start its receiver, for protocols whose
+    /// sender doesn't do that itself (ZMODEM senders send "rz\r" on their own).
+    public var remoteReceiveCommand: String? {
+        switch self {
+        case .ymodemSend: return "rb\r"
+        case let .xmodemSend(url):
+            return "rx " + Self.endOfOptions(Self.typeable(url.lastPathComponent)).map(Self.shellQuoted).joined(separator: " ") + "\r"
+        default: return nil
+        }
+    }
+
+    /// `name` as it can be typed at a remote shell: each byte outside printable ASCII becomes "_".
+    /// The remote's tty acts on control characters before the shell sees them (CR ends the line,
+    /// ^C interrupts it), and on a 7-bit line or with ISTRIP a UTF-8 "Ċ" (C4 8A) arrives as "D", LF.
+    static func typeable(_ name: String) -> String {
+        String(decoding: name.utf8.map { (0x20...0x7E).contains($0) ? $0 : UInt8(ascii: "_") }, as: UTF8.self)
+    }
+
+    /// A name for lrzsz's command line: after "--" if it starts with "-", so it isn't read as options.
+    static func endOfOptions(_ name: String) -> [String] {
+        name.hasPrefix("-") ? ["--", name] : [name]
+    }
+
+    static func shellQuoted(_ s: String) -> String {
+        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+}
+
 public enum TransferError: Error, CustomStringConvertible {
     case toolNotFound([String])
     case noFiles
@@ -159,6 +188,9 @@ public final class ExternalTransfer: FileTransfer, @unchecked Sendable {
             self.stdoutPipe.fileHandleForReading.readabilityHandler = nil
             self.stderrPipe.fileHandleForReading.readabilityHandler = nil
             let moved = self.moveReceivedFiles()
+            if case let .xmodemReceive(url) = self.kind, FileManager.default.fileExists(atPath: url.path) {
+                ZmodemReceiver.quarantine(url)
+            }
             let ok = p.terminationReason == .exit && p.terminationStatus == 0
             let (cancelled, lastStatus) = self.lock.withLock { (self.cancelled, self.lastStatus) }
             var message: String
@@ -175,8 +207,9 @@ public final class ExternalTransfer: FileTransfer, @unchecked Sendable {
         try process.run()
     }
 
-    /// Moves what lrzsz received into the download folder under safe, unused names.
-    /// Returns the names used where they differ from what the sender sent.
+    /// Moves what lrzsz received into the download folder under safe, unused names, marked as
+    /// downloaded like the built-in receiver's. Returns the names used where they differ from
+    /// what the sender sent.
     private func moveReceivedFiles() -> [String] {
         guard let incoming else { return [] }
         let fm = FileManager.default
@@ -185,6 +218,8 @@ public final class ExternalTransfer: FileTransfer, @unchecked Sendable {
         for name in names.sorted() {
             let source = incoming.appendingPathComponent(name)
             let target = ZmodemReceiver.uniqueURL(in: destination, for: name)
+            // Before the move, so it holds wherever the file ends up.
+            ZmodemReceiver.quarantine(source)
             do {
                 try fm.moveItem(at: source, to: target)
                 if target.lastPathComponent != name { renamed.append("\(name) as \(target.lastPathComponent)") }
@@ -250,31 +285,11 @@ public final class ExternalTransfer: FileTransfer, @unchecked Sendable {
         case let .xmodemReceive(url):
             // lrzsz refuses receive paths containing "/" ("Security Violation"), so run in the
             // file's folder with a bare name. -y: the save panel already confirmed any overwrite.
-            return (["lrx", "rx"], ["-b", "-y", "-vv"] + endOfOptions(url.lastPathComponent),
+            return (["lrx", "rx"], ["-b", "-y", "-vv"] + TransferKind.endOfOptions(url.lastPathComponent),
                     url.deletingLastPathComponent())
         case let .xmodemSend(url):
             return (["lsx", "sx"], ["-b", "-vv", url.path], nil)
         }
-    }
-
-    /// The command to type at the remote's shell to start its receiver, for protocols whose
-    /// sender doesn't do that itself (ZMODEM senders send "rz\r" on their own).
-    public static func remoteReceiveCommand(for kind: TransferKind) -> String? {
-        switch kind {
-        case .ymodemSend: return "rb\r"
-        case let .xmodemSend(url):
-            return "rx " + endOfOptions(url.lastPathComponent).map(shellQuoted).joined(separator: " ") + "\r"
-        default: return nil
-        }
-    }
-
-    /// A name for lrzsz's command line: after "--" if it starts with "-", so it isn't read as options.
-    static func endOfOptions(_ name: String) -> [String] {
-        name.hasPrefix("-") ? ["--", name] : [name]
-    }
-
-    static func shellQuoted(_ s: String) -> String {
-        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     static func findTool(_ names: [String]) -> URL? {

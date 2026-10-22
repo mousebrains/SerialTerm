@@ -438,4 +438,38 @@ struct ZmodemSessionLeftoverTests {
         #expect(text.hasSuffix("GliderDos N -1 >"), "\(text.debugDescription)")
         #expect(!text.contains("OOGlider"))
     }
+
+    /// A ZRQINIT split across reads used to start the receive without the read that completed
+    /// it: its bytes were dropped, and the trace never showed the opening frame.
+    @Test func aSplitOpeningFrameReachesTheReceiver() throws {
+        let pty = try PtyPair()
+        let dir = try tempDir()
+        let session = Session(port: SerialPort(path: pty.slavePath, config: SerialConfig()), downloadDirectory: dir)
+        var o = ZmodemOptions()
+        o.timeout = 1
+        session.zmodemOptions = o
+        session.traceDirectory = dir
+        let events = Inbox<SessionEvent>()
+        session.onEvent = { events.add($0) }
+        try session.open()
+        defer { session.close() }
+        var e = ZEncoder()
+        let rqinit = Data(e.hexHeader(ZHeader(.rqinit)))
+        pty.writeToPort(Data("sz x\r\n".utf8) + rqinit.prefix(3))
+        usleep(200_000)
+        pty.writeToPort(rqinit.dropFirst(3))
+        #expect(events.wait(timeout: 2) { $0.contains { if case .transferStarted = $0 { true } else { false } } })
+        _ = pty.readFromPort(timeout: 0.5)  // ZRINIT
+        session.cancelTransfer()
+        #expect(events.wait(timeout: 5) { $0.contains { if case .transferFinished = $0 { true } else { false } } })
+        let traceURL = try #require(session.lastTraceURL)
+        var trace = ""
+        let deadline = Date().addingTimeInterval(2)
+        repeat {
+            usleep(50_000)
+            trace = (try? String(contentsOf: traceURL, encoding: .utf8)) ?? ""
+        } while !trace.contains("FAILED") && Date() < deadline
+        #expect(trace.contains("opening bytes that triggered auto-start"), "\(trace)")
+        #expect(trace.contains("RX ZRQINIT"), "\(trace)")
+    }
 }
