@@ -37,8 +37,19 @@ detailed protocol diagnostics, and millisecond-timestamped session logs.
 
 ## Install
 
-Requires macOS 15 (Sequoia) or later. There is no release yet: until the first one, build from
-source (below). The download will work from the first release on.
+Requires macOS 15 (Sequoia) or later. There is no release yet: until the first one, install with
+Homebrew or build from source (below). The download will work from the first release on.
+
+- **Homebrew**: builds from source, so macOS doesn't block it. Needs Xcode 26 or the Command
+  Line Tools 26 or later.
+
+  ```sh
+  brew install --HEAD mousebrains/tap/serialterm
+  serialterm                     # opens the app; `brew info serialterm` shows how to add it to Applications
+  ```
+
+  `--HEAD` builds the latest `main`; it won't be needed after the first release. Update with
+  `brew upgrade --fetch-HEAD serialterm` (without `--fetch-HEAD`, brew doesn't check `main`).
 
 - **Download** (from the first release): get `SerialTerm.zip` from
   [Releases](https://github.com/mousebrains/SerialTerm/releases).

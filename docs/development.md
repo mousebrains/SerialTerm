@@ -112,6 +112,11 @@ package updates.
    allow each new version once with Open Anyway in System Settings ▸ Privacy & Security. For
    notarized builds, add a Developer ID
    certificate and `notarytool` credentials as repository secrets and extend `release.yml`.
+4. Update the formula in [mousebrains/homebrew-tap](https://github.com/mousebrains/homebrew-tap):
+   `url` is the tag's source tarball
+   (`https://github.com/mousebrains/SerialTerm/archive/refs/tags/v0.2.0.tar.gz`), and `sha256` is
+   its checksum (`curl -L <url> | shasum -a 256`). The first time, also drop `--HEAD` from the
+   tap's CI and from both READMEs.
 
 ## Conventions
 
