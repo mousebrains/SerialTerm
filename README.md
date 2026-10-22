@@ -37,17 +37,19 @@ detailed protocol diagnostics, and millisecond-timestamped session logs.
 
 ## Install
 
-Requires macOS 15 (Sequoia) or later.
+Requires macOS 15 (Sequoia) or later. There is no release yet: until the first one, build from
+source (below). Homebrew and the download will work from the first release on.
 
-- **Homebrew**: builds from source, so macOS doesn't block it, and installs lrzsz too. Needs
-  Xcode 26 or the Command Line Tools 26 or later.
+- **Homebrew** (from the first release): builds from source, so macOS doesn't block it, and
+  installs lrzsz too. Needs Xcode 26 or the Command Line Tools 26 or later.
 
   ```sh
   brew install mousebrains/tap/serialterm
   serialterm                     # opens the app; `brew info serialterm` shows how to add it to Applications
   ```
 
-- **Download**: get `SerialTerm.zip` from [Releases](https://github.com/mousebrains/SerialTerm/releases).
+- **Download** (from the first release): get `SerialTerm.zip` from
+  [Releases](https://github.com/mousebrains/SerialTerm/releases).
   The app is not notarized, so macOS blocks it the first time: open it once, then click
   **Open Anyway** in **System Settings ▸ Privacy & Security**. Each new version needs this once.
 - **Build from source** (requires Xcode 26 or later, or only the Command Line Tools:
@@ -92,10 +94,12 @@ simulated noisy line, and on a Rockland MicroRider (native USB serial) in both d
 | MicroRider → Mac | 262 KB – 134.6 MB; batch of 3 (183 MB) | MD5 verified; ~9.6 MB/s; occasional lost USB data recovered automatically |
 | Mac → MicroRider | batch of 3 (193.5 MB) | MD5 verified; ~2.3 MB/s, which is the MicroRider's receive limit (raw: 4.5 MB/s, 3.0 MB/s to storage) |
 
-XMODEM and YMODEM (via lrzsz) are also verified on the MicroRider in both directions.
+XMODEM and YMODEM (via lrzsz) are also verified on the MicroRider in both directions. ZMODEM's
+error recovery has changed since these runs (from testing with a TWR Slocum glider and a code
+review, [#4](https://github.com/mousebrains/SerialTerm/issues/4)); it will be checked on the
+hardware again before the first release.
 
-Next: native XMODEM/YMODEM; testing with a TWR Slocum glider. See the [Changelog](CHANGELOG.md) for
-details.
+Next: native XMODEM/YMODEM. See the [Changelog](CHANGELOG.md) for details.
 
 ## License
 

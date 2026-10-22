@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Pat Welch
 
+import CryptoKit
 import Foundation
 import Testing
 @testable import SerialCore
@@ -58,15 +59,71 @@ struct HardwareSendTests {
 
         // Ask the device for the checksum of what it received.
         Thread.sleep(forTimeInterval: 0.5)
-        let before = shown.all.count
-        session.sendFromUser(Data("md5sum '\(file.lastPathComponent)'\r".utf8))
-        _ = shown.wait(timeout: 30) { items in
-            String(decoding: items.dropFirst(before).reduce(Data(), +), as: UTF8.self).contains(file.lastPathComponent + "\r\n")
-                && items.count > before + 1
-        }
-        Thread.sleep(forTimeInterval: 1)
-        print("PROBE REMOTE:", String(decoding: shown.all.dropFirst(before).reduce(Data(), +), as: UTF8.self).debugDescription)
+        let remote = remoteMD5(of: file.lastPathComponent, session: session, shown: shown)
+        let local = try md5(of: file)
+        print("PROBE MD5: local \(local), device \(remote ?? "?")")
+        #expect(remote == local)
     }
+}
+
+/// Receives a file from a real device running a shell with lrzsz: types `sz` there, so the
+/// transfer starts automatically, then compares MD5s. Runs only when SERIALTERM_PROBE_PORT and
+/// SERIALTERM_PROBE_RECEIVE_FILE (a path on the device) are set.
+@Suite(.enabled(if: ProcessInfo.processInfo.environment["SERIALTERM_PROBE_RECEIVE_FILE"] != nil))
+struct HardwareReceiveTests {
+    @Test func receiveFileAndVerify() throws {
+        let env = ProcessInfo.processInfo.environment
+        let path = env["SERIALTERM_PROBE_PORT"]!
+        let remoteFile = env["SERIALTERM_PROBE_RECEIVE_FILE"]!
+        let traceDir = URL(fileURLWithPath: env["SERIALTERM_PROBE_TRACE_DIR"] ?? NSTemporaryDirectory())
+        let downloads = FileManager.default.temporaryDirectory.appendingPathComponent("SerialTermProbe-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: downloads, withIntermediateDirectories: true)
+
+        let session = Session(port: SerialPort(path: path, config: SerialConfig()), downloadDirectory: downloads)
+        session.traceDirectory = traceDir
+        let shown = Inbox<Data>()
+        let events = Inbox<SessionEvent>()
+        session.onDisplay = { shown.add($0) }
+        session.onEvent = { events.add($0) }
+        try session.open()
+        defer { session.close() }
+
+        let remote = remoteMD5(of: remoteFile, session: session, shown: shown)
+        let start = Date()
+        session.sendFromUser(Data("sz -b '\(remoteFile)'\r".utf8))
+        let finished = events.wait(timeout: 600) { $0.contains { if case .transferFinished = $0 { true } else { false } } }
+        let seconds = Date().timeIntervalSince(start)
+        #expect(finished)
+        for case let .transferFinished(success, message) in events.all {
+            print("PROBE RECEIVE: \(success ? "OK" : "FAILED") \(message) in \(String(format: "%.1f", seconds)) s")
+            #expect(success)
+        }
+        if let url = session.lastTraceURL { print("PROBE TRACE: \(url.path)") }
+        let name = (remoteFile as NSString).lastPathComponent
+        let got = downloads.appendingPathComponent(name)
+        let size = (try? FileManager.default.attributesOfItem(atPath: got.path)[.size] as? Int) ?? 0
+        print("PROBE RATE: \(String(format: "%.2f", Double(size) / seconds / 1e6)) MB/s")
+        let local = try md5(of: got)
+        print("PROBE MD5: device \(remote ?? "?"), received \(local)")
+        #expect(remote == local)
+    }
+}
+
+/// The device's `md5sum` of `file` (as the shell there sees the path), read off the terminal.
+private func remoteMD5(of file: String, session: Session, shown: Inbox<Data>) -> String? {
+    let before = shown.all.count
+    session.sendFromUser(Data("md5sum '\(file)'\r".utf8))
+    let pattern = #/(?m)^([0-9a-f]{32})\s/#
+    _ = shown.wait(timeout: 120) { items in
+        String(decoding: items.dropFirst(before).reduce(Data(), +), as: UTF8.self).firstMatch(of: pattern) != nil
+    }
+    let text = String(decoding: shown.all.dropFirst(before).reduce(Data(), +), as: UTF8.self)
+    return text.firstMatch(of: pattern).map { String($0.1) }
+}
+
+private func md5(of url: URL) throws -> String {
+    let data = try Data(contentsOf: url, options: .alwaysMapped)
+    return Insecure.MD5.hash(data: data).map { String(format: "%02x", $0) }.joined()
 }
 
 /// Raw receive throughput of a device shell (no ZMODEM): streams N 'A' bytes into `head -c N`.

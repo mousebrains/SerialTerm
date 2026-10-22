@@ -10,13 +10,16 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Build & test
     runs-on: macos-15
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       # In the macOS 27 SDK these are macros whose compiler plugin ships only with Xcode, so they
       # break builds with the Command Line Tools. The runners' older SDKs wouldn't catch State.
@@ -28,22 +31,25 @@ jobs:
           fi
 
       - name: Select newest Xcode
+        id: xcode
         run: |
           ls -d /Applications/Xcode*.app
-          XCODE=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          XCODE=$(printf "%s\n" /Applications/Xcode_*.app | sort -V | tail -1)
           sudo xcode-select -s "$XCODE"
           xcodebuild -version
           swift --version
+          echo "name=$(basename "$XCODE" .app)" >> "$GITHUB_OUTPUT"
 
       - name: Install lrzsz (interop tests, XMODEM/YMODEM)
         run: brew install lrzsz
 
+      # Keyed by Xcode too: a .build from another toolchain can fail to link or import.
       - name: Cache Swift packages
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: .build
-          key: spm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
-          restore-keys: spm-${{ runner.os }}-
+          key: spm-${{ runner.os }}-${{ steps.xcode.outputs.name }}-${{ hashFiles('Package.resolved') }}
+          restore-keys: spm-${{ runner.os }}-${{ steps.xcode.outputs.name }}-
 
       - name: Build
         run: swift build
@@ -60,12 +66,12 @@ jobs:
     needs: test
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Select newest Xcode
         run: |
           ls -d /Applications/Xcode*.app
-          XCODE=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          XCODE=$(printf "%s\n" /Applications/Xcode_*.app | sort -V | tail -1)
           sudo xcode-select -s "$XCODE"
           xcodebuild -version
           swift --version
@@ -79,11 +85,39 @@ jobs:
       - name: Zip
         run: ditto -c -k --keepParent build/SerialTerm.app build/SerialTerm.zip
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: SerialTerm-${{ github.sha }}
           path: build/SerialTerm.zip
           retention-days: 14
+
+  # Swift 5 language mode doesn't check for data races; Thread Sanitizer finds them at run time
+  # in the suites with the most threads (serial I/O, sessions, pacing, transfers).
+  thread-sanitizer:
+    name: Thread Sanitizer
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Select newest Xcode
+        run: |
+          XCODE=$(printf "%s\n" /Applications/Xcode_*.app | sort -V | tail -1)
+          sudo xcode-select -s "$XCODE"
+          swift --version
+
+      - name: Install lrzsz
+        run: brew install lrzsz
+
+      - name: Test with Thread Sanitizer
+        run: |
+          swift test --sanitize=thread --filter \
+            'PacingTests|PacingCancelTests|PacedSessionTests|SerialPortPtyTests|SerialPortRobustnessTests|SessionLifecycleTests|LogFileTests|ExternalTransferBehaviourTests|ZmodemSessionLeftoverTests|ZmodemReceiverRobustnessTests' \
+            2>&1 | tee tsan.log
+          if grep -q "WARNING: ThreadSanitizer" tsan.log; then
+            echo "::error::Thread Sanitizer reported a data race"
+            exit 1
+          fi
 
   command-line-tools:
     name: App bundle (Command Line Tools only)
@@ -92,7 +126,7 @@ jobs:
     env:
       DEVELOPER_DIR: /Library/Developer/CommandLineTools
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Show Command Line Tools
         run: |
