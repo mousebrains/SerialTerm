@@ -71,6 +71,17 @@ final class PortScanner: ObservableObject {
         watch()
     }
 
+    deinit {
+        // The callbacks hold an unretained pointer to the scanner: stop them before it goes.
+        if let notifyPort {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), IONotificationPortGetRunLoopSource(notifyPort).takeUnretainedValue(),
+                                  .defaultMode)
+            IONotificationPortDestroy(notifyPort)
+        }
+        if addedIterator != 0 { IOObjectRelease(addedIterator) }
+        if removedIterator != 0 { IOObjectRelease(removedIterator) }
+    }
+
     func refresh() {
         ports = Self.scan()
     }

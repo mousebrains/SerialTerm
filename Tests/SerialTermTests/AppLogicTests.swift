@@ -208,3 +208,35 @@ struct TerminalModeResetTests {
         #expect(t.getCursorLocation().x == 19 && t.getCursorLocation().y == 9)
     }
 }
+
+/// Mach port names this task holds.
+private func machPortNames() -> Int {
+    var names: mach_port_name_array_t?
+    var namesCount: mach_msg_type_number_t = 0
+    var types: mach_port_type_array_t?
+    var typesCount: mach_msg_type_number_t = 0
+    guard mach_port_names(mach_task_self_, &names, &namesCount, &types, &typesCount) == KERN_SUCCESS else { return -1 }
+    if let names {
+        vm_deallocate(mach_task_self_, vm_address_t(UInt(bitPattern: names)),
+                      vm_size_t(namesCount) * vm_size_t(MemoryLayout<mach_port_name_t>.size))
+    }
+    if let types {
+        vm_deallocate(mach_task_self_, vm_address_t(UInt(bitPattern: types)),
+                      vm_size_t(typesCount) * vm_size_t(MemoryLayout<mach_port_type_t>.size))
+    }
+    return Int(namesCount)
+}
+
+@MainActor
+struct PortScannerTests {
+    /// A released scanner kept its IOKit notification port and iterators, and left its run loop
+    /// source on the main run loop with a dangling pointer for the next hot-plug.
+    @Test func releasingAScannerFreesItsPorts() {
+        _ = PortScanner()  // first use of IOKit sets up ports of its own
+        let before = machPortNames()
+        for _ in 0..<50 { _ = PortScanner() }
+        let after = machPortNames()
+        #expect(before > 0)
+        #expect(after - before < 30, "\(after - before) Mach ports more after 50 scanners came and went")
+    }
+}
