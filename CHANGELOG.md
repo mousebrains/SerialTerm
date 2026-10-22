@@ -113,6 +113,32 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
   - The receive command (`rz`/`zr`) now goes at the typing pace; timeouts use a clock that doesn't
     jump; files of 4 GiB or more are refused up front; and the duplicate-`ZRPOS` window is longer
     on slow lines.
+- Review (#4), app:
+  - Auto-reconnect could switch a window to another instrument: a USB serial number from a
+    previous adapter survived a switch to one without a serial number. And every port of a
+    multi-port adapter (FT2232, FT4232) shares one serial number, so reconnects and presets picked
+    the first port. Ports are now matched by name and serial number first, then by serial number
+    and USB interface only when that's unambiguous.
+  - Replies the terminal makes by itself (focus and mouse reports) reconnected a disconnected
+    window, and modes one device turned on (mouse reporting, bracketed paste, the alternate
+    screen) carried over to the next. Only typing and pasting connect now, and each new
+    connection resets those modes.
+  - A refused baud rate stayed in the window and in the saved settings; they now go back to what
+    the port is using. Auto-reconnect gave up for good after one failed open.
+  - The Log button showed "recording" when no log could be opened; it now shows ⚠, and the status
+    bar says "Not logging".
+  - Transfer and line controls stayed enabled when they couldn't work (disconnected, or during a
+    transfer), and file panels could stack up. Quitting during a transfer now asks first; closing
+    the window is blocked until the transfer is cancelled.
+  - Every window reopened with the last-used window's port; each now gets its own back.
+  - Option is no longer always Meta: *Use Option as Meta key* in Settings ▸ General (on by default).
+  - Settings: one unreadable preset no longer loses all of them, unreadable settings are kept
+    aside before defaults replace them, preset names must be non-empty and distinct, values are
+    kept in range (a negative baud rate trapped), and a custom baud must be digits only ("1e6" was
+    read as 16).
+  - Messages: the trace hint appears only for a failure that wrote a trace, a cancel says so, an
+    unplug's reason is no longer overwritten, and only transfers you started beep on failure. Late
+    events from a closed session can't affect the window's new one.
 - ZMODEM send could stall for a minute and fail when the receiver lost data, asked for a resend,
   lost data again and went quiet (as Slocum gliders do at 921600 baud). After a ZEOF gets no
   reply the sender now resends from the last position the receiver confirmed, which makes the

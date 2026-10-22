@@ -153,14 +153,34 @@ public protocol FileTransfer: AnyObject, Sendable {
 
 `PortScanner` lists `IOSerialBSDClient` services and reports each one's callout device
 (`/dev/cu.*`). It searches up the IOKit registry for USB vendor and product names, the serial
-number, and VID/PID. `IOServiceAddMatchingNotification` (first-match and terminated) keeps the list
-current. When an adapter returns after an unexpected unplug, `TerminalModel` matches it by USB
-serial number and reconnects.
+number, the interface number (`bInterfaceNumber`), and VID/PID. `IOServiceAddMatchingNotification`
+(first-match and terminated) keeps the list current.
+
+`SerialPortInfo.find(path:serialNumber:interface:in:)` is the one rule for finding a remembered
+port again, used by auto-reconnect and presets: the same `/dev` name with the same (or no
+recorded) serial number first; otherwise the serial number, narrowed by the interface, but only
+if exactly one port matches. Every port of a multi-port adapter has the same serial number.
+`ConnectionSettings.setPort` always records the port's serial number and interface, including
+"none", so an earlier adapter's can't linger.
+
+## Terminal input
+
+What the user types reaches `TerminalModel` through the SwiftTerm delegate's `send`. Replies the
+terminal makes by itself (focus and mouse reports, answers to queries) and pastes come through
+`SerialTerminalView.send(source:data:)`, which marks a paste as user input. Only user input
+connects a disconnected window. On a new connection the terminal is fed `TerminalModeReset`
+locally (mouse and focus reporting, bracketed paste, kitty keyboard, alternate screen off, then
+DECSTR), so one device's modes don't carry over to the next.
 
 ## Settings
 
-- `ConnectionSettings` (port, its USB serial number, `SerialConfig`) belongs to a window. The most
-  recent one is stored as the default for new windows.
+- `ConnectionSettings` (port, its USB serial number and interface, `SerialConfig`, Backspace,
+  pacing, receive command) belongs to a window. It is kept in the window's `@SceneStorage`, so a
+  window macOS reopens at launch gets its own back, and the most recent one is stored as the
+  default for new windows. A change the port refuses is reverted rather than saved.
 - `Preferences` (keyboard, display, folders, transfer options, `ZmodemOptions`) is app-wide. It is
   held by `AppSettings.shared` and saved to `UserDefaults` as JSON under `preferences.v2`.
-  Decoding goes field by field, so adding settings never discards saved ones.
+  Decoding goes field by field, so adding settings never discards saved ones; presets decode one
+  by one, so one bad preset is skipped alone; values are clamped to their valid ranges. Settings
+  that can't be read at all are copied to `preferences.v2.unreadable` before defaults replace
+  them.
