@@ -164,8 +164,14 @@ public final class Session: @unchecked Sendable {
         if let active {
             lock.withLock { logger }?.note("Closing during \(active.kind.displayName); cancelling it")
             active.cancel()
-            port.discardPendingWrites()
-            port.write(ExternalTransfer.abortSequence)
+            // The transfer sends the abort as it stops; give it a moment, and send one ourselves
+            // if it doesn't finish in time.
+            let deadline = Date().addingTimeInterval(1)
+            while lock.withLock({ transfer === active }) && Date() < deadline { usleep(10_000) }
+            if lock.withLock({ transfer === active }) {
+                port.discardPendingWrites()
+                port.write(ExternalTransfer.abortSequence)
+            }
             port.waitForPendingWrites(maxPending: 0, timeout: 1)
         }
         port.close()
@@ -274,6 +280,10 @@ public final class Session: @unchecked Sendable {
         }
 
         t.onOutput = { [weak self] data in self?.port.write(data) }
+        if let z = t as? ZmodemTransfer {
+            z.typeReceiveCommand = { [weak self] command in self?.typeCommand(command, wait: true) }
+            z.onLeftover = { [weak self] data in self?.showAfterTransfer(data) }
+        }
         t.waitForOutput = { [weak self, weak t] maxPending in
             self?.port.waitForPendingWrites(maxPending: maxPending, until: { [weak self, weak t] in
                 guard let self, let t else { return true }
@@ -357,6 +367,13 @@ public final class Session: @unchecked Sendable {
         }
         commandDone.unlock()
         port.waitForPendingWrites(maxPending: 0, timeout: 5)
+    }
+
+    /// Input a transfer didn't use (the remote's prompt after it, or text that only looked like a
+    /// transfer starting): log and display it. Not scanned for transfers, so it can't restart one.
+    private func showAfterTransfer(_ data: Data) {
+        lock.withLock { logger }?.log(.rx, data)
+        onDisplay?(data)
     }
 
     public func cancelTransfer() {

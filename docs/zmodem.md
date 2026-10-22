@@ -24,7 +24,7 @@ unusual peers.
 | Hex, binary (`ZBIN`) and binary CRC-32 (`ZBIN32`) headers | ✓ |
 | Streaming (`ZCRCG`), with `ZRPOS` rewind on errors | ✓ |
 | Windowed sending (`ZCRCW` + `ZACK`) for receivers with a small buffer, or when forced | ✓ |
-| `ZCRCQ` (receiver acknowledges mid-stream) | ✓ answered when receiving; not sent |
+| `ZCRCQ` (receiver acknowledges mid-stream) | ✓ answered when receiving; sent every 32 KB when streaming |
 | Escaping all control characters (`ESCCTL`) | ✓ both directions |
 | `ZSINIT` (sender's attention string) | acknowledged and ignored |
 | `ZCHALLENGE`, `ZFREECNT`, `ZCRC` (file CRC request) | ✓ |
@@ -46,35 +46,54 @@ Automatic start can be turned off in Settings ▸ Transfers.
 
 ## Sending
 
-1. Send `rz\r` (this starts the receiver if the remote is at a shell prompt), then a `ZRQINIT`
-   header.
+1. Type the window's receive command and Return (`rz` by default, `zr` for Slocum gliders, or
+   nothing; set under the slider button and in presets). This starts the receiver if the remote
+   is at its prompt; a receiver that is already running skips it as noise. With paced typing on,
+   it goes out at that pace. Then send a `ZRQINIT` header.
 2. Wait for `ZRINIT`, which gives the receiver's capabilities and buffer size. A `ZRQINIT` echoed
    by the remote shell before `rz` starts is recognized and ignored.
 3. For each file: `ZFILE` with the file offer
    `name NUL size mtime(octal) mode(octal) 0 files-left bytes-left NUL`. The receiver answers
    `ZRPOS` (where to start) or `ZSKIP`.
-4. `ZDATA` at that position, then data subpackets of the configured block size (default 1024):
-   - **Streaming** when the receiver advertises buffer 0 with `CANFDX|CANOVIO`. All subpackets are
-     `ZCRCG`, and the sender checks the back channel for `ZRPOS` between subpackets without
-     stopping.
+4. `ZDATA` at that position, then data subpackets of the configured block size (default 1024),
+   never larger than the receiver's buffer:
+   - **Streaming** when the receiver advertises buffer 0 with `CANFDX|CANOVIO`. Subpackets are
+     `ZCRCG`, except a `ZCRCQ` every 32 KB, which asks the receiver to confirm its position
+     (`ZACK`) without stopping. The sender checks the back channel for `ZRPOS` and `ZACK` between
+     subpackets without stopping.
    - **Windowed** when the receiver has a buffer, lacks `CANOVIO`/`CANFDX`, or the window setting is
-     on. The sender sends `ZCRCW` every *window* bytes and waits for `ZACK`.
+     on. The sender sends `ZCRCW` after every *window* bytes (never more) and waits for `ZACK`,
+     timing the wait from when the window has gone out.
 5. `ZEOF` with the file length. The receiver answers `ZRINIT` when it has everything.
 6. After the last file: `ZFIN`, the receiver answers `ZFIN`, and the sender sends `OO`.
 
-Output is written in 16 KB batches, with at most 64 KB queued at the serial port, so a `ZRPOS`
-takes effect within a few milliseconds even on fast links.
+Output is written in 16 KB batches, with at most 64 KB queued at the serial port. On a `ZRPOS`,
+the sender drops its queued output, stops the batch being written, and flushes the driver's
+buffer, so the resend starts within about one batch's time on the line (roughly 0.2 s at
+921600 baud, 1.4 s at 115200).
+
+Files of 4 GiB or more are refused before the transfer starts: ZMODEM positions are 32 bits.
 
 ## Receiving
 
 - SerialTerm advertises `CANFDX|CANOVIO|CANFC32` with buffer 0, meaning the sender may stream.
   With *Force CRC-16* it omits `CANFC32`; with *Escape all control characters* it adds `ESCCTL`.
-- File names are made safe: path components are removed, control characters and `:` are removed,
-  and leading dots are dropped. An empty name becomes `received`. Existing files are never
-  overwritten; the new copy is saved as `name (1).ext`.
-- The modification time is set from the file offer.
+- File names are made safe: path components are removed; control characters, invisible
+  formatting characters (bidirectional overrides, zero-width characters) and `:` are removed;
+  leading dots are dropped; and long names are shortened to fit the file system. An empty name
+  becomes `received`. Existing files are never overwritten, even one created a moment earlier by
+  another window, and a symlink is never followed; the new copy is saved as `name (1).ext`.
+- Received files are marked as downloaded (`com.apple.quarantine`), as browsers do, so macOS
+  checks a received app or script before it can run.
+- The modification time is set from the file offer. Sizes and counts in the offer are clamped to
+  sensible ranges.
 - If the received length differs from the announced size, the session log notes it.
 - If the transfer fails, the partial file is deleted.
+- The remote's prompt after the transfer is shown in the terminal, even when it arrives together
+  with the final `ZFIN`.
+- If what started the receive turns out not to be a transfer (no file is offered: only noise, or
+  our own `ZRINIT` echoed back), the receiver gives up quickly, and the terminal shows what
+  arrived meanwhile. Three such failures within 30 s pause automatic starts for 30 s.
 
 ## Error recovery
 
@@ -84,19 +103,37 @@ then ignores everything until a `ZDATA` header for that offset arrives. The send
 drops any output not yet written and restarts from the requested offset.
 
 lrzsz's receiver repeats `ZRPOS` while it skips the data that was in flight, so the sender
-ignores a repeat of the offset it restarted from within the last 2 s. A quick repeat can also be
-genuine, when the data right after the restart was damaged too. Then the receiver ignores the
-sender's `ZEOF`, because it doesn't have the data yet, and the sender, seeing no reply, restarts
-from that offset. The receiver ignores a `ZEOF` for a different offset, but it doesn't restart
-its timeout for it, so it asks again on schedule even while the sender keeps repeating `ZEOF`.
+ignores a repeat of the offset it restarted from within the last 2 s (longer on slow lines,
+where the data in flight takes longer to drain). A quick repeat can also be genuine, when the
+data right after the restart was damaged too. Then the receiver ignores the sender's `ZEOF`,
+because it doesn't have the data yet, and the sender, seeing no reply, restarts from that offset.
+
+Some receivers (Slocum gliders at 921600 baud) go quiet after losing data, without asking for it
+again, or their request is lost. If `ZEOF` gets no reply, the sender resends from the last
+position the receiver confirmed (its last `ZRPOS` or `ZACK`; the `ZCRCQ` every 32 KB keeps that
+recent): a receiver waiting there takes the data, and one elsewhere answers with a `ZRPOS` giving
+its position. It does this up to three times in a row without progress. A `ZRINIT` that arrives
+late, after such a resend has started, is taken as the answer to `ZEOF`.
+
+The receiver asks for data again (`ZRPOS`) whenever it has had no new data for the timeout,
+however busy the line is meanwhile with other traffic: stale `ZEOF`s, headers it ignores, or
+noise. A stray `*` or CAN on the sender's back channel is skipped rather than taken for the
+start of a header.
 
 Limits:
-- 50 errors per file when receiving, 30 rewinds per file when sending;
-- 10 retries for the handshake, the file offer and `ZEOF`.
+- Sending: 30 rewinds in a row without the receiver confirming new data, and 30 plus one per KB
+  of the file in all; 6 `ZRQINIT`s for the handshake; 10 offers per file; 10 `ZEOF`s per attempt;
+  each wait for a reply lasts at most the timeout, whatever else arrives.
+- Receiving: 50 resend requests in a row without progress, and 50 plus one per 4 KB received in
+  all. While waiting for a file: 10 silent timeouts, 16 bad headers or runs of noise, noise for
+  one timeout without a valid header, 3 echoes of our own `ZRINIT`, or 40 headers without a file.
+  A damaged or truncated file offer is answered with `ZNAK`, so the sender offers it again.
 
 Five consecutive CAN bytes (`0x18`) from the remote abort the transfer. A local cancel, or a fatal
-error, sends ten CANs and ten backspaces. The backspaces erase the CANs if the remote has already
-returned to a shell.
+error, drops the output still queued, then sends ten CANs and ten backspaces. The backspaces erase
+the CANs if the remote has already returned to a shell. Cancel takes effect within one
+subpacket, even while streaming, and even if flow control is holding the line. Closing the window
+or the connection during a transfer cancels it the same way.
 
 ## Protocol traces
 
@@ -143,8 +180,9 @@ What to look at:
   data being discarded, which is normal. Elsewhere it can be shell output, an echo, or noise.
 - **`bad subpacket: CRC-32 mismatch, 516 bytes, ZCRCG`** followed by `TX ZRPOS`: an error and its
   recovery.
-- **`timeout: nothing received for 10.0s while waiting for …`**: what each side was waiting for when
-  it stalled.
+- **`timeout: nothing received for 10.0 s while waiting for …`**: what each side was waiting for when
+  it stalled. **`timeout: deadline passed while waiting for …`**: data stopped making progress
+  although other bytes kept arriving.
 - **The summary**: duration, throughput, header and subpacket counts, raw line bytes, and error
   counts.
 
@@ -201,6 +239,13 @@ messages. This is useful for checking whether a problem is in the device or in S
 - the encoding and decoding of every header format and subpacket, including all 256 byte values
   and the `@`-CR escape;
 - native ZMODEM against itself, over a link that flips and drops bytes in either direction;
+- the sender against scripted receivers and a rate-limited line (`ZmodemSenderRobustnessTests`):
+  a stray byte on the back channel, cancel while streaming or with output held, receivers that
+  answer `ZEOF` with `ZNAK`, go away, advertise a buffer, lose a reply, or overrun and go quiet
+  after every burst;
+- the receiver against broken and hostile senders (`ZmodemReceiverRobustnessTests`): huge numbers
+  in the file offer, streaming or echoing devices, stale `ZEOF`s, trickling noise, damaged offers,
+  hostile file names and symlinks;
 - native ZMODEM against lrzsz in both directions, over a pseudo-terminal pair, both cleanly and
   over a noisy line, and with each workaround setting;
 - cancelling, timeouts, an unanswered sender, and file naming;

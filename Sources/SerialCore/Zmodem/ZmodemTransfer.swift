@@ -18,11 +18,21 @@ public final class ZmodemTransfer: FileTransfer, @unchecked Sendable {
     /// Typed (with CR) before a send starts, to start the remote's receiver from its prompt:
     /// "rz" for lrzsz, "zr" for Slocum gliders, "" for none.
     public let receiveCommand: String
+    /// Types the receive command (at the session's typing pace), returning once it has gone out.
+    /// Nil sends it at once.
+    public var typeReceiveCommand: ((String) -> Void)?
+    /// Input that wasn't part of the transfer, for the terminal: what arrived after it ended (the
+    /// remote's prompt), and everything received if it never became a transfer (a ZMODEM header
+    /// in ordinary output). Called on the protocol thread or the serial queue, in order.
+    public var onLeftover: ((Data) -> Void)?
     /// Protocol trace for this transfer, if tracing is on.
     public let trace: ZmodemTrace?
 
     private let directory: URL
     private let channel = ByteChannel()
+    private let lock = NSLock()
+    /// The protocol has ended; input goes to `onLeftover`.
+    private var ended = false
 
     /// - Parameter traceURL: where to write the protocol trace (ignored if `options.traceLevel` is off).
     public init(kind: TransferKind, directory: URL, options: ZmodemOptions = ZmodemOptions(), traceURL: URL? = nil,
@@ -61,19 +71,30 @@ public final class ZmodemTransfer: FileTransfer, @unchecked Sendable {
     }
 
     public func feed(_ data: Data) {
+        lock.lock()
+        guard !ended else {
+            lock.unlock()
+            onLeftover?(data)
+            return
+        }
         trace?.raw(.rx, data)
         channel.append(data)
+        lock.unlock()
     }
 
     public func cancel() {
         trace?.note("cancel requested")
+        // Drop queued output now: that also releases a sender waiting for the line to drain,
+        // which flow control may be holding up indefinitely.
+        discardOutput?()
         channel.cancel()
     }
 
     private func run() {
         let trace = self.trace
+        let reader = ZReader(channel)
         let link = ZLink(
-            reader: ZReader(channel),
+            reader: reader,
             trace: trace,
             output: { [weak self] data in
                 trace?.raw(.tx, data)
@@ -89,15 +110,18 @@ public final class ZmodemTransfer: FileTransfer, @unchecked Sendable {
 
         var success = false
         var message = ""
+        var receiver: ZmodemReceiver?
         do {
             switch kind {
             case .zmodemReceive:
-                let r = try ZmodemReceiver(link: link, directory: directory, options: options).run()
+                receiver = ZmodemReceiver(link: link, directory: directory, options: options)
+                let r = try receiver!.run()
                 message = r.received.isEmpty
                     ? "No files received"
                     : "Received \(Self.files(r.received.count)) (\(ZLink.size(r.bytes)))"
             case let .zmodemSend(files):
-                let r = try ZmodemSender(link: link, options: options, receiveCommand: receiveCommand).run(files: files)
+                let r = try ZmodemSender(link: link, options: options, receiveCommand: receiveCommand,
+                                         typeReceiveCommand: typeReceiveCommand).run(files: files)
                 message = "Sent \(Self.files(r.sent.count)) (\(ZLink.size(r.bytes)))"
                     + (r.skipped.isEmpty ? "" : ", \(r.skipped.count) skipped by receiver")
             default:
@@ -105,18 +129,29 @@ public final class ZmodemTransfer: FileTransfer, @unchecked Sendable {
             }
             success = true
         } catch let error as ZmodemError {
+            // Drop file data still queued: after a cancel it would reach the remote's shell once
+            // its receiver has gone, and it would hold up our abort.
+            link.discardUnsent()
             if error != .remoteCancelled {
-                // Stop the remote side too.
+                // Stop the remote side too. After a local cancel don't wait for it to go out:
+                // the line may be what's stuck.
                 trace?.note("sending abort sequence (CAN×10, BS×10)")
                 link.send(Z.abortSequence)
-                link.waitForOutput()
+                if error == .cancelled { link.flush() } else { link.waitForOutput() }
             }
             message = error.description
         } catch {
+            link.discardUnsent()
             link.send(Z.abortSequence)
             message = "\(error)"
         }
         trace?.summary(outcome: (success ? "OK: " : "FAILED: ") + message, duration: Date().timeIntervalSince(started))
+        lock.withLock {
+            ended = true
+            // A receive that failed before any file was offered was probably no transfer at all.
+            let leftover = reader.takeLeftover(includingCapture: !success && receiver.map { !$0.sawFile } ?? false)
+            if !leftover.isEmpty { onLeftover?(Data(leftover)) }
+        }
         onFinish?(success, message)
     }
 

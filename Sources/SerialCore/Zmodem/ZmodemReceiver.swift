@@ -22,17 +22,21 @@ final class ZmodemReceiver {
         var bytes = 0
     }
 
-    /// The file being written, removed if the transfer fails part way.
-    private var partial: URL?
+    /// The file being written, removed if the transfer fails part way, and its identity, so the
+    /// removal can't hit a file that has replaced it meanwhile.
+    private var partial: (url: URL, inode: UInt64)?
     /// Files offered so far in this session, and their announced bytes, for batch progress.
     private var offeredFiles = 0
     private var offeredBytes = 0
+    /// True once the sender has offered a file: what it sent is a transfer, not stray text.
+    var sawFile: Bool { offeredFiles > 0 }
 
     func run() throws -> Result {
         var result = Result()
-        defer {
-            if let partial { try? FileManager.default.removeItem(at: partial) }
-        }
+        defer { removePartial() }
+        // Until a file is offered this may be no transfer at all (a header in ordinary output);
+        // keep what arrives so it can be shown if so.
+        reader.startCapture()
 
         // When auto-started, the sender's opening ZRQINIT is already waiting; read it (so it's
         // traced) before answering, rather than answering twice.
@@ -40,37 +44,62 @@ final class ZmodemReceiver {
             if first.frame != .rqinit { link.log("Sender opened with \(first.name) rather than ZRQINIT") }
         }
         sendReceiverInit()
-        var timeouts = 0
+        // Waiting for a file: give up after 10 silent timeouts; after 16 bad headers or runs of
+        // noise (each up to 1 KB), or noise for `timeout` without a valid header (a sender's
+        // headers come promptly); after 3 echoes of our own ZRINIT; or after 40 headers that lead
+        // nowhere. So a device that is streaming, echoing or babbling can't hold the session for
+        // long, and what it sent is then shown after all.
+        var timeouts = 0, noise = 0, echoes = 0, unproductive = 0
+        var noiseSince: TimeInterval?
+        defer { reader.deadline = nil }
         while true {
             reader.waitingFor = "a file from the sender"
+            reader.deadline = noiseSince.map { $0 + timeout }
             let h: ZHeader?
             do {
-                h = try reader.readHeader(timeout: timeout)
+                h = try reader.readHeader(timeout: timeout, garbageLimit: 1024)
             } catch ZmodemError.timeout {
+                if let start = noiseSince, Uptime.now >= start + timeout {
+                    throw ZmodemError.protocolError("No ZMODEM sender (only noise received)")
+                }
                 timeouts += 1
                 if timeouts > 10 { throw ZmodemError.protocolError("No ZMODEM sender") }
                 sendReceiverInit()
                 continue
             }
+            timeouts = 0
             guard let h else {
-                sendReceiverInit()
+                noise += 1
+                if noise > 16 { throw ZmodemError.protocolError("No ZMODEM sender (only noise received)") }
+                if noiseSince == nil { noiseSince = Uptime.now }
                 continue
             }
-            timeouts = 0
+            noiseSince = nil
+            unproductive += 1
+            if unproductive > 40 { throw ZmodemError.protocolError("No file offered by the sender") }
 
             switch h.frame {
             case .rqinit, .eof, .data:
                 // Sender (re)starting, or it missed our ZRINIT after the last file.
                 sendReceiverInit()
+            case .rinit:
+                // That's what we send: the remote is echoing us (or is a receiver too). Answering
+                // would echo back and forth forever.
+                echoes += 1
+                if echoes >= 3 {
+                    throw ZmodemError.protocolError("The remote sends back what it receives; no ZMODEM sender is running")
+                }
             case .sinit:
                 // Carries the sender's attention string; we have no use for it.
-                _ = try reader.readSubpacket(crc32: h.crc32, timeout: timeout)
-                link.sendHex(ZHeader(.ack, position: 1))
+                if case .data = try readOfferSubpacket(h) { link.sendHex(ZHeader(.ack, position: 1)) }
             case .file:
-                guard case let .data(info, _) = try reader.readSubpacket(crc32: h.crc32, timeout: timeout) else {
+                guard case let .data(info, _) = try readOfferSubpacket(h) else {
                     link.sendHex(ZHeader(.nak))
                     continue
                 }
+                reader.stopCapture()
+                unproductive = 0
+                noise = 0
                 if let url = try receiveFile(info: info) {
                     result.received.append(url)
                     result.bytes += (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
@@ -79,14 +108,19 @@ final class ZmodemReceiver {
             case .fin:
                 link.sendHex(ZHeader(.fin))
                 link.waitForOutput()
-                // The sender closes with "OO"; read it so it doesn't reach the terminal.
+                // The sender closes with "OO"; read it so it doesn't reach the terminal, but leave
+                // anything else (the remote's prompt) for the terminal.
                 for _ in 0..<2 {
-                    guard let b = try? reader.byte(timeout: 1), b == 0x4F else { break }
+                    guard let b = try? reader.byte(timeout: 1, quiet: true) else { break }
+                    if b != 0x4F {
+                        reader.unread()
+                        break
+                    }
                 }
                 return result
             case .command:
                 // Never run commands sent by the remote.
-                _ = try reader.readSubpacket(crc32: h.crc32, timeout: timeout)
+                _ = try readOfferSubpacket(h)
                 link.log("Refused ZCOMMAND from sender")
                 link.sendHex(ZHeader(.compl, position: 1))
             case .freecnt:
@@ -99,63 +133,99 @@ final class ZmodemReceiver {
         }
     }
 
+    /// The subpacket after ZFILE, ZSINIT or ZCOMMAND. A timeout in it (its end was lost) is
+    /// treated like a damaged one: the sender offers again, rather than the batch failing.
+    private func readOfferSubpacket(_ h: ZHeader) throws -> ZReader.Subpacket {
+        do {
+            return try reader.readSubpacket(crc32: h.crc32, timeout: timeout)
+        } catch ZmodemError.timeout {
+            link.trace?.note("timeout in the \(h.name) subpacket")
+            return .bad("timeout")
+        }
+    }
+
     private func sendReceiverInit() {
-        // Full duplex, can receive while writing to disk, CRC-32; buffer size 0 = stream freely.
         var caps = Z.canFDX | Z.canOVIO
         if !options.forceCRC16 { caps |= Z.canFC32 }
         if options.escapeControls { caps |= Z.escCtl }
         link.sendHex(ZHeader(.rinit, zf0: caps))
     }
 
+    private func removePartial() {
+        guard let p = partial else { return }
+        partial = nil
+        // Only if the path is still the file we created.
+        var st = stat()
+        if lstat(p.url.path, &st) == 0, UInt64(st.st_ino) == p.inode {
+            try? FileManager.default.removeItem(at: p.url)
+        }
+    }
+
     /// Returns the saved file, or nil if it was skipped.
     private func receiveFile(info: [UInt8]) throws -> URL? {
         let meta = FileInfo(info)
+        // The name as it may appear in logs and traces: it comes from the remote.
+        let name = SessionLogger.escapeNote(meta.name)
         // "Files left" and "bytes left" count this file too.
         offeredFiles += 1
         link.fileNumber = (offeredFiles, meta.filesLeft.map { offeredFiles - 1 + $0 })
         link.batchBytes = meta.bytesLeft.map { (offeredBytes, offeredBytes + $0) }
-        offeredBytes += meta.size ?? 0
-        link.trace?.line(.rx, "  file \"\(meta.name)\" fields \"\(meta.rawFields)\" → size \(meta.size.map(String.init) ?? "?"), "
-            + "mtime \(meta.modified.map { "\($0)" } ?? "none"), mode \(meta.mode.map { String($0, radix: 8) } ?? "?")")
-        let url = Self.uniqueURL(in: directory, for: meta.name)
-        let fm = FileManager.default
-        guard fm.createFile(atPath: url.path, contents: nil),
-              let handle = try? FileHandle(forWritingTo: url) else {
-            link.log("Cannot create \(url.path); skipping")
+        offeredBytes = min(offeredBytes + (meta.size ?? 0), 1 << 60)
+        link.trace?.line(.rx, "  file \"\(name)\" fields \"\(SessionLogger.escapeNote(meta.rawFields))\" → "
+            + "size \(meta.size.map(String.init) ?? "?"), mtime \(meta.modified.map { "\($0)" } ?? "none"), "
+            + "mode \(meta.mode.map { String($0, radix: 8) } ?? "?")")
+        let url: URL, handle: FileHandle
+        do {
+            (url, handle) = try Self.createUnique(in: directory, for: meta.name)
+        } catch {
+            link.log("Cannot save \(name) in \(directory.path): \(error.localizedDescription); skipping")
             link.sendHex(ZHeader(.skip))
             return nil
         }
-        partial = url
+        var st = stat()
+        partial = (url, fstat(handle.fileDescriptor, &st) == 0 ? UInt64(st.st_ino) : 0)
         defer { try? handle.close() }
+        Self.quarantine(url)
 
-        link.log("Receiving \(meta.name)\(meta.size.map { " (\($0) bytes)" } ?? "") → \(url.lastPathComponent)")
+        link.log("Receiving \(name)\(meta.size.map { " (\($0) bytes)" } ?? "") → \(url.lastPathComponent)")
         link.startFile(at: 0)
         link.progress("Receiving", url.lastPathComponent, 0, meta.size, force: true)
 
         var offset = 0
-        var errors = 0
+        // Resend requests since the data last moved forward: a sender stuck at one place fails
+        // the file after 50, while one that keeps making progress may carry on, up to an overall
+        // limit that grows with the file.
+        var errors = 0, totalErrors = 0, progressAt = 0
+        // Without new data by this time, ask again, however busy the line is with other things
+        // (stale ZEOFs, ignored headers, noise).
+        var progressDeadline = Uptime.now + timeout
+        defer { reader.deadline = nil }
         func requestResend(_ why: String) throws {
+            if offset > progressAt {
+                errors = 0
+                progressAt = offset
+            }
             errors += 1
-            if errors > 50 { throw ZmodemError.tooManyErrors("\(meta.name): \(why)") }
-            if errors <= 10 || errors % 10 == 0 { link.log("\(meta.name): \(why); asking for data from \(offset)") }
+            totalErrors += 1
+            if errors > 50 || totalErrors > 50 + offset / 4096 { throw ZmodemError.tooManyErrors("\(name): \(why)") }
+            if totalErrors <= 10 || totalErrors % 10 == 0 { link.log("\(name): \(why); asking for data from \(offset)") }
             link.sendHex(ZHeader(.rpos, position: offset))
+            progressDeadline = Uptime.now + timeout
         }
 
         link.sendHex(ZHeader(.rpos, position: 0))
-        var staleEOFDeadline: Date?
         while true {
-            reader.waitingFor = "ZDATA/ZEOF for \(meta.name) at \(offset)"
-            let wait = staleEOFDeadline.map { max(0.05, $0.timeIntervalSinceNow) } ?? timeout
-            let deadline = Date().addingTimeInterval(wait)
-            staleEOFDeadline = nil
+            reader.waitingFor = "ZDATA/ZEOF for \(name) at \(offset)"
+            reader.deadline = progressDeadline
             let h: ZHeader?
             do {
                 // After an error the sender's in-flight data arrives before it reacts, so allow plenty of noise.
-                h = try reader.readHeader(timeout: wait, garbageLimit: 1 << 22)
+                h = try reader.readHeader(timeout: timeout, garbageLimit: 1 << 22)
             } catch ZmodemError.timeout {
-                try requestResend("timeout")
+                try requestResend("no data")
                 continue
             }
+            reader.deadline = nil
             guard let h else {
                 try requestResend("bad header")
                 continue
@@ -168,6 +238,7 @@ final class ZmodemReceiver {
                     try requestResend("data at \(h.position), expected \(offset)")
                     continue
                 }
+                progressDeadline = Uptime.now + timeout
                 let runStart = offset
                 defer {
                     if let trace = link.trace, !trace.verbose, offset > runStart {
@@ -187,12 +258,17 @@ final class ZmodemReceiver {
                         try requestResend(why)
                         break subpackets
                     case let .data(bytes, end):
+                        // ZMODEM positions are 32 bits.
+                        guard offset + bytes.count <= Int(UInt32.max) else {
+                            throw ZmodemError.fileError("\(name) is larger than ZMODEM's 4 GiB limit")
+                        }
                         do {
                             try handle.write(contentsOf: bytes)
                         } catch {
                             throw ZmodemError.fileError("Cannot write \(url.lastPathComponent): \(error.localizedDescription)")
                         }
                         offset += bytes.count
+                        progressDeadline = Uptime.now + timeout
                         link.trace?.dataBytesIn += bytes.count
                         link.progress("Receiving", url.lastPathComponent, offset, meta.size)
                         switch end {
@@ -210,19 +286,18 @@ final class ZmodemReceiver {
                 }
             case .eof:
                 // A ZEOF for a different offset may have left before our ZRPOS arrived, so ignore
-                // it (as lrzsz does) but keep our timeout running: a sender repeating ZEOF faster
-                // than that would otherwise stop us from ever asking for the data again.
+                // it (as lrzsz does). The progress deadline keeps running, so a sender repeating
+                // ZEOF can't stop us from asking for the data again.
                 guard h.position == offset else {
                     link.trace?.note("ignoring ZEOF at \(h.position); have \(offset) bytes")
-                    staleEOFDeadline = deadline
                     continue
                 }
                 if let size = meta.size, size != offset {
-                    link.log("\(meta.name): announced \(size) bytes but received \(offset)")
+                    link.log("\(name): announced \(size) bytes but received \(offset)")
                 }
                 try? handle.close()
                 if let mtime = meta.modified {
-                    try? fm.setAttributes([.modificationDate: mtime], ofItemAtPath: url.path)
+                    try? FileManager.default.setAttributes([.modificationDate: mtime], ofItemAtPath: url.path)
                 }
                 partial = nil
                 link.fileFinished()
@@ -231,11 +306,10 @@ final class ZmodemReceiver {
                 return url
             case .file:
                 // The sender didn't see our ZRPOS; read its offer again and answer.
-                _ = try reader.readSubpacket(crc32: h.crc32, timeout: timeout)
+                _ = try readOfferSubpacket(h)
                 link.sendHex(ZHeader(.rpos, position: offset))
             case .skip:
-                try? fm.removeItem(at: url)
-                partial = nil
+                removePartial()
                 return nil
             case .nak:
                 link.sendHex(ZHeader(.rpos, position: offset))
@@ -260,39 +334,94 @@ final class ZmodemReceiver {
         /// Everything after the name, as sent, for diagnostics.
         var rawFields = ""
 
+        // The numbers come from the remote: clamp them, so arithmetic on them can't overflow
+        // (which traps, taking the app down). A size can't exceed ZMODEM's 32-bit positions anyway.
+        static let maxSize = Int(UInt32.max)
+        static let maxFiles = 1_000_000
+        static let maxBatchBytes = 1 << 50
+        /// 9999-12-31: later modification times are nonsense.
+        static let maxTime = 253_402_300_799
+
         init(_ bytes: [UInt8]) {
             let parts = bytes.split(separator: 0, maxSplits: 1, omittingEmptySubsequences: false)
             name = String(decoding: parts.first ?? [], as: UTF8.self)
             rawFields = parts.count > 1 ? String(decoding: parts[1].prefix { $0 != 0 }, as: UTF8.self) : ""
             let fields = rawFields.split(separator: " ")
-            size = fields.count > 0 ? Int(fields[0]) : nil
-            if fields.count > 1, let t = Int(fields[1], radix: 8), t > 0 {
+            size = fields.count > 0 ? Int(fields[0]).map { min(max($0, 0), Self.maxSize) } : nil
+            if fields.count > 1, let t = Int(fields[1], radix: 8), t > 0, t <= Self.maxTime {
                 modified = Date(timeIntervalSince1970: TimeInterval(t))
             }
             if fields.count > 2 { mode = Int(fields[2], radix: 8) }
-            if fields.count > 4, let n = Int(fields[4]), n > 0 { filesLeft = n }
-            if fields.count > 5, let n = Int(fields[5]), n > 0 { bytesLeft = n }
+            if fields.count > 4, let n = Int(fields[4]), n > 0 { filesLeft = min(n, Self.maxFiles) }
+            if fields.count > 5, let n = Int(fields[5]), n > 0 { bytesLeft = min(n, Self.maxBatchBytes) }
         }
     }
 
-    /// A safe local name: last path component only, no leading dots, no control characters,
-    /// and "name (1).ext" style if the file already exists.
-    static func uniqueURL(in directory: URL, for remoteName: String) -> URL {
+    /// A safe local name for `remoteName`, as stem and extension: the last path component only;
+    /// no leading dots, control characters, invisible formatting characters (bidirectional
+    /// overrides, zero-width characters) or ':'; and short enough for "name (9999).ext" to fit
+    /// in 255 bytes.
+    static func safeName(_ remoteName: String) -> (stem: String, ext: String) {
         var base = remoteName.split(whereSeparator: { $0 == "/" || $0 == "\\" }).last.map(String.init) ?? ""
-        base = String(base.unicodeScalars.filter { $0.value >= 0x20 && $0.value != 0x7F && $0 != ":" })
+        base = String(String.UnicodeScalarView(base.unicodeScalars.filter { s in
+            switch s.properties.generalCategory {
+            case .control, .format, .lineSeparator, .paragraphSeparator: return false
+            default: return s != ":"
+            }
+        }))
         while base.hasPrefix(".") { base.removeFirst() }
         if base.isEmpty { base = "received" }
+        var stem = base, ext = ""
+        if let dot = base.lastIndex(of: "."), base.distance(from: dot, to: base.endIndex) <= 33 {
+            stem = String(base[..<dot])
+            ext = String(base[base.index(after: dot)...])
+        }
+        let room = 255 - " (9999)".utf8.count - (ext.isEmpty ? 0 : ext.utf8.count + 1)
+        while stem.utf8.count > room { stem.removeLast() }
+        return (stem, ext)
+    }
 
+    private static func name(_ stem: String, _ ext: String, _ n: Int) -> String {
+        let s = n == 0 ? stem : "\(stem) (\(n))"
+        return ext.isEmpty ? s : "\(s).\(ext)"
+    }
+
+    /// Creates a new file with a safe name in `directory`, "name (1).ext" style if the name is
+    /// taken. It never replaces anything, even a file another window created a moment ago, and
+    /// never follows a symlink.
+    static func createUnique(in directory: URL, for remoteName: String) throws -> (URL, FileHandle) {
+        let (stem, ext) = safeName(remoteName)
+        for n in 0..<10_000 {
+            let url = directory.appendingPathComponent(name(stem, ext, n))
+            let fd = open(url.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o644)
+            if fd >= 0 { return (url, FileHandle(fileDescriptor: fd, closeOnDealloc: true)) }
+            guard errno == EEXIST else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        }
+        throw POSIXError(.EEXIST)
+    }
+
+    /// The first unused safe name for `remoteName` in `directory` (for files lrzsz received,
+    /// which are then moved there; a move never replaces an existing file).
+    static func uniqueURL(in directory: URL, for remoteName: String) -> URL {
+        let (stem, ext) = safeName(remoteName)
         let fm = FileManager.default
-        var url = directory.appendingPathComponent(base)
-        let ext = url.pathExtension
-        let stem = url.deletingPathExtension().lastPathComponent
-        var n = 1
-        while fm.fileExists(atPath: url.path) {
-            let name = ext.isEmpty ? "\(stem) (\(n))" : "\(stem) (\(n)).\(ext)"
-            url = directory.appendingPathComponent(name)
+        var n = 0
+        var url = directory.appendingPathComponent(name(stem, ext, 0))
+        while fm.fileExists(atPath: url.path) || (try? fm.destinationOfSymbolicLink(atPath: url.path)) != nil {
             n += 1
+            url = directory.appendingPathComponent(name(stem, ext, n))
         }
         return url
+    }
+
+    /// Marks a received file as downloaded, as browsers do, so Gatekeeper checks it before it can
+    /// run: a received `.command` file or app would otherwise open without a prompt.
+    static func quarantine(_ url: URL) {
+        #if os(macOS)
+        var values = URLResourceValues()
+        values.quarantineProperties = ["LSQuarantineAgentName": "SerialTerm", "LSQuarantineType": "LSQuarantineTypeOtherDownload"]
+        var url = url
+        try? url.setResourceValues(values)
+        #endif
     }
 }
