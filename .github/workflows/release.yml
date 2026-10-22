@@ -25,7 +25,7 @@ jobs:
           xcodebuild -version
           swift --version
 
-      - name: Install lrzsz
+      - name: Install lrzsz (the remote side in the interop tests)
         run: brew install lrzsz
 
       - name: Test

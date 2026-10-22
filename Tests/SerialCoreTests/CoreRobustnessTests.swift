@@ -218,69 +218,38 @@ struct SerialPortRobustnessTests {
     }
 }
 
-struct ExternalTransferCommandTests {
-    @Test func namesThatLookLikeOptions() throws {
-        let (_, args, _) = try ExternalTransfer.command(for: .xmodemReceive(URL(fileURLWithPath: "/tmp/-ZZ.bin")))
-        #expect(args.suffix(2) == ["--", "-ZZ.bin"])
-        let (_, plain, _) = try ExternalTransfer.command(for: .xmodemReceive(URL(fileURLWithPath: "/tmp/ZZ.bin")))
-        #expect(plain.last == "ZZ.bin" && !plain.contains("--"))
+struct RemoteCommandTests {
+    @Test func namesThatLookLikeOptions() {
         #expect(TransferKind.xmodemSend(URL(fileURLWithPath: "/tmp/-x.bin")).remoteReceiveCommand == "rx '--' '-x.bin'\r")
         #expect(TransferKind.xmodemSend(URL(fileURLWithPath: "/tmp/it's.bin")).remoteReceiveCommand == "rx 'it'\\''s.bin'\r")
     }
-
-    /// "\r\n" is one Character in Swift, so splitting on "\r" or "\n" kept CRLFs in messages.
-    @Test func statusLines() {
-        #expect(ExternalTransfer.latestStatusLine("\r\nTransfer incomplete\r\n") == "Transfer incomplete")
-        #expect(ExternalTransfer.latestStatusLine("Bytes Sent:   1024\rBytes Sent:   2048\r") == "Bytes Sent:   2048")
-        #expect(ExternalTransfer.latestStatusLine(" \r\n \n") == nil)
-    }
 }
 
-@Suite(.serialized, .enabled(if: ExternalTransfer.findTool(["lsz", "sz"]) != nil, "lrzsz not installed (brew install lrzsz)"))
-struct ExternalTransferBehaviourTests {
-    /// lsz's output used to go straight into an unbounded queue: on a slow line the whole file
-    /// queued up, lsz's ZEOF timer expired, and a cancel waited behind it all.
-    @Test func lszIsHeldBackAndCancelDiscardsFirst() throws {
-        let file = try tempDir().appendingPathComponent("f.bin")
-        try Data(repeating: 1, count: 1000).write(to: file)
-        let t = try ExternalTransfer(kind: .zmodemSend([file]), workingDirectory: file.deletingLastPathComponent())
-        let calls = Inbox<String>()
-        let finished = Inbox<Bool>()
-        t.onOutput = { calls.add($0 == ExternalTransfer.abortSequence ? "abort" : "output") }
-        t.waitForOutput = { calls.add("wait \($0)") }
-        t.discardOutput = { calls.add("discard") }
-        t.onFinish = { ok, _ in finished.add(ok) }
-        try t.start()
-        #expect(calls.wait(timeout: 5) { $0.contains("wait \(ExternalTransfer.maxQueuedOutput)") })
-        t.cancel()
-        #expect(finished.wait(timeout: 5) { !$0.isEmpty })
-        let after = calls.all.drop { $0 != "discard" }
-        #expect(after.first == "discard" && after.dropFirst().first == "abort")
-    }
-
-    /// A transfer that can't start (here: its folder is gone) used to leave the window stuck
-    /// "transferring": `transferStarted` with no `transferFinished`, after typing `rx` to the remote.
-    @Test func failedStartIsReportedAndTypesNothing() throws {
+@Suite(.serialized)
+struct TransferStartTests {
+    /// A file that can't be read used to get as far as typing `rx` to the remote, whose receiver
+    /// then waited for data that never came.
+    @Test func unreadableFileFailsBeforeTypingAnything() throws {
         let pty = try PtyPair()
         let dir = try tempDir()
-        let file = dir.appendingPathComponent("f.bin")
-        try Data(repeating: 1, count: 100).write(to: file)
-        let session = Session(port: SerialPort(path: pty.slavePath, config: SerialConfig()),
-                              downloadDirectory: dir.appendingPathComponent("no-such-folder"))
+        let file = dir.appendingPathComponent("gone.bin")  // never created
+        let session = Session(port: SerialPort(path: pty.slavePath, config: SerialConfig()), downloadDirectory: dir)
         let events = Inbox<SessionEvent>()
         session.onEvent = { events.add($0) }
         try session.open()
         defer { session.close() }
 
-        #expect(throws: Session.TransferStartFailed.self) { try session.startTransfer(.xmodemSend(file), startRemote: true) }
-        #expect(events.wait(timeout: 2) { $0.count >= 2 })
-        guard case .transferStarted = events.all.first, case let .transferFinished(success, _) = events.all.last else {
+        try session.startTransfer(.xmodemSend(file), startRemote: true)
+        #expect(events.wait(timeout: 5) { $0.contains { if case .transferFinished = $0 { true } else { false } } })
+        guard case .transferStarted = events.all.first, case let .transferFinished(success, message) = events.all.last else {
             Issue.record("events: \(events.all)")
             return
         }
         #expect(!success)
+        #expect(message.contains("gone.bin"), "\(message)")
         #expect(!session.isTransferring)
-        #expect(pty.readFromPort(timeout: 0.5).isEmpty, "nothing typed to the remote")
+        let typed = pty.readFromPort(timeout: 0.5)
+        #expect(typed.range(of: Data("rx".utf8)) == nil, "nothing typed to the remote: \(typed as NSData)")
     }
 }
 
@@ -302,7 +271,7 @@ struct SessionLifecycleTests {
         session?.close()
         session = nil
         let after = pty.readFromPort(timeout: 1)
-        #expect(after.range(of: ExternalTransfer.abortSequence) != nil, "abort sent before the port closed")
+        #expect(after.range(of: TransferKind.abortSequence) != nil, "abort sent before the port closed")
         #expect(released == nil)
     }
 
@@ -357,23 +326,22 @@ struct SessionLifecycleTests {
 }
 
 extension ZmodemEndToEndTests {
-    /// lrz keeps names the built-in receiver makes safe, such as ".profile"; files it receives
-    /// are now moved into the download folder under the same safe names.
-    @Test func lrzszReceiveUsesSafeNames() throws {
+    /// Names from the remote are made safe, whichever protocol brings them: no leading dots
+    /// (lrzsz's own receiver keeps names such as ".profile").
+    @Test func ymodemReceiveUsesSafeNames() throws {
         let pty = try PtyPair()
         let src = try tempDir(), dst = try tempDir()
         try Data("dot file".utf8).write(to: src.appendingPathComponent(".hidden"))
         let session = Session(port: SerialPort(path: pty.slavePath, config: SerialConfig()), downloadDirectory: dst)
         session.autoZmodem = false
-        session.useExternalZmodem = true
         let events = Inbox<SessionEvent>()
         session.onEvent = { events.add($0) }
         try session.open()
         defer { session.close() }
 
-        try session.startTransfer(.zmodemReceive)
-        let remote = try runRemote(["lsz", "sz"], ["-b", ".hidden"], in: src, pty: pty)
+        let remote = try runRemote(["lsb", "sb"], ["-b", ".hidden"], in: src, pty: pty)
         defer { remote.stop() }
+        try session.startTransfer(.ymodemReceive)
         #expect(events.wait(timeout: 30) { $0.contains { if case .transferFinished = $0 { true } else { false } } })
         for case let .transferFinished(success, message) in events.all { #expect(success, "\(message)") }
         let names = try FileManager.default.contentsOfDirectory(atPath: dst.path)

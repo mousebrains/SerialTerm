@@ -101,8 +101,26 @@ struct SerialPortPtyTests {
     }
 }
 
-/// End-to-end ZMODEM over a pty, with lrzsz playing the remote side. Skipped if lrzsz isn't installed.
-@Suite(.serialized, .enabled(if: ExternalTransfer.findTool(["lsz", "sz"]) != nil, "lrzsz not installed (brew install lrzsz)"))
+/// lrzsz, which plays the remote device in the interop tests (`brew install lrzsz`).
+enum Lrzsz {
+    static let searchPaths = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]
+
+    static func find(_ names: [String]) -> URL? {
+        let pathDirs = (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map(String.init)
+        for name in names {
+            for dir in searchPaths + pathDirs {
+                let candidate = URL(fileURLWithPath: dir).appendingPathComponent(name)
+                if FileManager.default.isExecutableFile(atPath: candidate.path) { return candidate }
+            }
+        }
+        return nil
+    }
+
+    static var installed: Bool { find(["lsz", "sz"]) != nil }
+}
+
+/// End-to-end transfers over a pty, with lrzsz playing the remote side. Skipped if lrzsz isn't installed.
+@Suite(.serialized, .enabled(if: Lrzsz.installed, "lrzsz not installed (brew install lrzsz)"))
 struct ZmodemEndToEndTests {
     func tempDir() throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("SerialTermTests-\(UUID().uuidString)")
@@ -176,11 +194,11 @@ struct ZmodemEndToEndTests {
     func runRemote(_ names: [String], _ args: [String], in dir: URL, pty: PtyPair,
                    fromRemote: Mangler? = nil, toRemote: Mangler? = nil) throws -> RemoteProgram {
         signal(SIGPIPE, SIG_IGN)
-        return try RemoteProgram(try #require(ExternalTransfer.findTool(names)), args, in: dir, pty: pty,
+        return try RemoteProgram(try #require(Lrzsz.find(names)), args, in: dir, pty: pty,
                                  fromRemote: fromRemote, toRemote: toRemote)
     }
 
-    /// XMODEM/YMODEM through the lrzsz runner, against lrzsz on the far side of a pty.
+    /// The built-in XMODEM/YMODEM against lrzsz on the far side of a pty.
     @Test func xmodemReceiveIntoAFolder() throws {
         let pty = try PtyPair()
         let src = try tempDir(), dst = try tempDir()
@@ -191,7 +209,6 @@ struct ZmodemEndToEndTests {
         try session.open()
         defer { session.close() }
 
-        // A path with a folder used to make lrx refuse with "Security Violation".
         let target = dst.appendingPathComponent("sub dir", isDirectory: true)
         try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
         let out = target.appendingPathComponent("received one.bin")
@@ -270,11 +287,11 @@ struct ZmodemEndToEndTests {
         try session.open()
         defer { session.close() }
 
-        try session.startTransfer(.xmodemSend(file))  // lsx waits for the receiver's NAK/C
+        try session.startTransfer(.xmodemSend(file))  // waits for the receiver's NAK or 'C'
         usleep(300_000)
         session.cancelTransfer()
         #expect(events.wait(timeout: 10) { $0.contains { if case .transferFinished = $0 { true } else { false } } })
-        let abort = ExternalTransfer.abortSequence
+        let abort = TransferKind.abortSequence
         let first = pty.readFromPort(timeout: 1)
         #expect(first.range(of: abort) != nil, "cancel sends the abort")
 
@@ -404,14 +421,12 @@ struct ZmodemEndToEndTests {
         }
     }
 
-    @Test(arguments: [false, true])
-    func remoteSendsMultipleFilesAutoReceive(useLrzsz: Bool) throws {
+    @Test func remoteSendsMultipleFilesAutoReceive() throws {
         let pty = try PtyPair()
         let src = try tempDir(), dst = try tempDir()
         let files = try makeFiles(in: src)
 
         let session = Session(port: SerialPort(path: pty.slavePath, config: SerialConfig()), downloadDirectory: dst)
-        session.useExternalZmodem = useLrzsz
         let events = Inbox<SessionEvent>()
         session.onEvent = { events.add($0) }
         try session.open()
@@ -428,14 +443,12 @@ struct ZmodemEndToEndTests {
         }
     }
 
-    @Test(arguments: [false, true])
-    func remoteReceivesMultipleFiles(useLrzsz: Bool) throws {
+    @Test func remoteReceivesMultipleFiles() throws {
         let pty = try PtyPair()
         let src = try tempDir(), dst = try tempDir()
         let files = try makeFiles(in: src)
 
         let session = Session(port: SerialPort(path: pty.slavePath, config: SerialConfig()), downloadDirectory: src)
-        session.useExternalZmodem = useLrzsz
         let events = Inbox<SessionEvent>()
         session.onEvent = { event in
             events.add(event)
