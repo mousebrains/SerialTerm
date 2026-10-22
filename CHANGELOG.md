@@ -44,7 +44,9 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
 
 ### Changed
 - Requires macOS 15 or later (was 14).
-- Builds and tests with only the Command Line Tools; Xcode is optional.
+- Builds with only the Command Line Tools; Xcode is optional. (A clean build of the tests with only
+  the Command Line Tools sometimes fails with "plugin for module 'TestingMacros' not found", a
+  toolchain problem; building again finishes it.)
 
 ### Fixed
 - Found in an adversarial review ([#4](https://github.com/mousebrains/SerialTerm/issues/4)), core:
@@ -139,6 +141,15 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
   - Messages: the trace hint appears only for a failure that wrote a trace, a cancel says so, an
     unplug's reason is no longer overwritten, and only transfers you started beep on failure. Late
     events from a closed session can't affect the window's new one.
+- Review (#4), docs and CI:
+  - `docs/zmodem.md` described the old send command, recovery and limits; the README offered
+    Homebrew and download installs that don't exist before the first release.
+  - The release workflow pasted the tag name into a shell script and held a write token while
+    running Homebrew and the tests; it now passes the tag through the environment and publishes
+    from a separate job. Actions are pinned to commit SHAs, workflows get read-only tokens, and
+    the package cache is keyed by Xcode version.
+  - CI runs the threaded suites under Thread Sanitizer. A hardware test for receiving with native
+    ZMODEM was added, and the hardware send test now compares MD5s itself.
 - ZMODEM send could stall for a minute and fail when the receiver lost data, asked for a resend,
   lost data again and went quiet (as Slocum gliders do at 921600 baud). After a ZEOF gets no
   reply the sender now resends from the last position the receiver confirmed, which makes the

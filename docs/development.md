@@ -10,6 +10,12 @@
 `swift build` and `swift test` use whichever `xcode-select -p` points at, unless `DEVELOPER_DIR`
 is set. `scripts/make-app.sh` uses Xcode when it's installed.
 
+With only the Command Line Tools, a clean build of the tests sometimes fails with "plugin for
+module 'TestingMacros' not found" in `ZmodemDetectorTests.swift` or `ZmodemPerformanceTests.swift`.
+That is a toolchain problem: it happened in 5 of 7 clean builds on 2026-10-21 (CLT 27.0.0, Swift
+6.4), on `main` too, and building again finished each time. Xcode builds aren't affected, and the
+app itself always builds.
+
 ## Build and run
 
 ```sh
@@ -23,7 +29,7 @@ VERSION=0.2.0 BUILD=7 ./scripts/make-app.sh
 ## Testing
 
 ```sh
-swift test                                                    # everything (~5 s)
+swift test                                                    # everything (~35 s)
 swift test --filter ZmodemNativeTransferTests                 # one suite
 swift test -c release --filter ZmodemPerformanceTests         # throughput (release only)
 ```
@@ -33,12 +39,16 @@ swift test -c release --filter ZmodemPerformanceTests         # throughput (rele
 | `ZmodemDetectorTests` | Auto-start detection, including split and malformed headers |
 | `SessionLoggerTests` | Log line format and escaping |
 | `SerialPortPtyTests` | Real `SerialPort` I/O over a pseudo-terminal pair; binary transparency |
+| `CoreRobustnessTests` (several suites) | Log and trace files (name collisions, write failures, escaping), paced-typing cancel and echo matching, refused baud rates, discards and cancellable waits, lrzsz back-pressure and names, failed starts, closing mid-transfer, the automatic-start back-off |
+| `ZmodemSenderRobustnessTests` | The sender against scripted receivers and a rate-limited line (`SlowLine`, `FakeReceiver`): noise, cancel, lost replies, receivers that go quiet, go away or advertise a buffer |
+| `ZmodemReceiverRobustnessTests`, `ZmodemSessionLeftoverTests` | The receiver against broken and hostile senders; false automatic starts; the prompt after a transfer |
+| `SerialTermTests` (app target) | Port matching, preference decoding and clamping, preset names, baud parsing, the terminal mode reset |
 | `ZmodemCodecTests` | CRC check values, header and subpacket round trips, escaping, file-name safety |
 | `ZmodemNativeTransferTests` | Native ↔ native: multi-file, block-boundary sizes, corrupted and dropped data, a corrupted back channel, cancel, timeouts, no overwriting |
 | `ZmodemDiagnosticsTests` | Trace contents at each level; error snapshots; workaround options on the wire |
 | `ZmodemEndToEndTests` | Native and lrzsz engines against lrzsz over a pty, both directions; noisy line; each workaround (skipped if lrzsz is missing) |
 | `ZmodemPerformanceTests` | Encoder and end-to-end throughput floors (skipped in debug builds) |
-| `HardwareProbeTests`, `HardwareSendTests`, `HardwareRawThroughputTests` | Real devices; skipped unless enabled (below) |
+| `HardwareProbeTests`, `HardwareSendTests`, `HardwareReceiveTests`, `HardwareRawThroughputTests`, `HardwareXmodemTests` | Real devices; skipped unless enabled (below) |
 
 The pty-based tests give lrzsz pipes rather than the pty master itself, because lrzsz changes
 and flushes its terminal's modes, and on a pty those are shared with our side. A real remote has
@@ -55,10 +65,16 @@ PORT=/dev/cu.usbmodemXXXX
 # Open, send CR, print the reply
 SERIALTERM_PROBE_PORT=$PORT swift test --filter HardwareProbeTests
 
-# Send a file with native ZMODEM (types rz on the device), then md5sum it over the same line
+# Send a file with native ZMODEM (types rz on the device), then compare MD5s over the same line
 SERIALTERM_PROBE_PORT=$PORT SERIALTERM_PROBE_SEND_FILE=/path/to/file \
 SERIALTERM_PROBE_TRACE_DIR=/tmp/traces \
   swift test -c release --filter HardwareSendTests
+
+# Receive a file with native ZMODEM (types sz on the device; the receive starts by itself),
+# then compare MD5s. The path is on the device, relative to its shell's directory.
+SERIALTERM_PROBE_PORT=$PORT SERIALTERM_PROBE_RECEIVE_FILE=big.bin \
+SERIALTERM_PROBE_TRACE_DIR=/tmp/traces \
+  swift test -c release --filter HardwareReceiveTests
 
 # Raw receive throughput of the device (no protocol): 20 MB of 'A' into /dev/null and into ~/tpw
 SERIALTERM_PROBE_PORT=$PORT SERIALTERM_PROBE_RAW=1 \
@@ -77,8 +93,12 @@ removes `~/tpw/rawtest.bin`; change the path in the test for other devices.
 
 | Workflow | Trigger | Does |
 |---|---|---|
-| `ci.yml` | push to `main`, pull requests | On macOS: reject Xcode-only SwiftUI macros, install lrzsz, build, run all tests (debug), run the performance tests (release), build the app bundle and upload it as an artifact; separately, build the app bundle with only the Command Line Tools |
-| `release.yml` | tag `v*` (e.g. `v0.2.0`) | Run the tests, build `SerialTerm.app` with the tag's version, zip it, and publish a GitHub release with the zip and its SHA-256 |
+| `ci.yml` | push to `main`, pull requests | On macOS: reject Xcode-only SwiftUI macros, install lrzsz, build, run all tests (debug), run the performance tests (release), build the app bundle and upload it as an artifact; run the threaded suites under Thread Sanitizer; separately, build the app bundle with only the Command Line Tools |
+| `release.yml` | tag `v*` (e.g. `v0.2.0`) | Run the tests, build `SerialTerm.app` with the tag's version and zip it, with a read-only token; then, in a separate job that runs nothing else, publish a GitHub release with the zip and its SHA-256 |
+
+Workflows get a read-only token unless a job asks for more (only the release's publish job does),
+actions are pinned to commit SHAs (Dependabot keeps them current), and the Swift package cache is
+keyed by the Xcode version as well as `Package.resolved`.
 
 Dependabot (`.github/dependabot.yml`) opens weekly pull requests for GitHub Actions and Swift
 package updates.

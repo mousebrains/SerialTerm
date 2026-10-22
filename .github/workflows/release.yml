@@ -4,20 +4,23 @@ on:
   push:
     tags: ['v*']
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
-  release:
+  # Tests and builds with a read-only token: this job runs third-party code (Homebrew, the
+  # Swift packages' builds and the tests), so it can't publish anything.
+  build:
     runs-on: macos-15
     timeout-minutes: 30
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Select newest Xcode
         run: |
           ls -d /Applications/Xcode*.app
-          XCODE=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          XCODE=$(printf "%s\n" /Applications/Xcode_*.app | sort -V | tail -1)
           sudo xcode-select -s "$XCODE"
           xcodebuild -version
           swift --version
@@ -28,12 +31,13 @@ jobs:
       - name: Test
         run: swift test
 
+      # The tag name only ever reaches the shell through the environment, never pasted into a script.
       - name: Build SerialTerm.app
         env:
-          VERSION: ${{ github.ref_name }}
+          TAG: ${{ github.ref_name }}
           BUILD: ${{ github.run_number }}
         run: |
-          export VERSION="${VERSION#v}"
+          export VERSION="${TAG#v}"
           ./scripts/make-app.sh
 
       - name: Package
@@ -41,11 +45,33 @@ jobs:
           ditto -c -k --keepParent build/SerialTerm.app build/SerialTerm.zip
           shasum -a 256 build/SerialTerm.zip | tee build/SerialTerm.zip.sha256
 
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: release
+          path: |
+            build/SerialTerm.zip
+            build/SerialTerm.zip.sha256
+          retention-days: 7
+
+  # Publishes with a write token, running nothing but GitHub's own tools.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: release
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
         run: |
-          gh release create "${{ github.ref_name }}" build/SerialTerm.zip build/SerialTerm.zip.sha256 \
-            --title "SerialTerm ${{ github.ref_name }}" \
+          gh release create "$TAG" SerialTerm.zip SerialTerm.zip.sha256 \
+            --title "SerialTerm $TAG" \
             --notes "Ad-hoc signed, not notarized: open it once, then click Open Anyway in System Settings ▸ Privacy & Security. See CHANGELOG.md for changes." \
             --verify-tag
