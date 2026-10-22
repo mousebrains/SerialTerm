@@ -22,12 +22,17 @@ final class TerminalModel: ObservableObject {
     /// With wait-for-echo: the last paced character got no echo in time.
     @Published private(set) var pacedEchoMissing = false
     @Published private(set) var logURL: URL?
+    /// Why this window has no log open although logging is on (couldn't open it, or it stopped).
+    @Published private(set) var logProblem: String?
     @Published private(set) var lastTraceURL: URL?
     @Published private(set) var cols = 80
     @Published private(set) var rows = 24
 
     weak var terminalView: TerminalView? {
-        didSet { applyTerminalPrefs() }
+        didSet {
+            terminalView?.optionAsMetaKey = prefs.optionAsMeta
+            applyTerminalPrefs()
+        }
     }
 
     let settings: AppSettings
@@ -42,8 +47,28 @@ final class TerminalModel: ObservableObject {
     private var settingsObserver: AnyCancellable?
     /// True when the user wants to be connected; drives auto-reconnect after an unplug.
     private var wantConnected = false
-    /// A remote `rz` repeats its ready header while we wait; show only one file picker.
-    private var choosingFilesForRemote = false
+    /// Bumped when the user connects, disconnects or picks a port, so a pending reconnect retry stands down.
+    private var reconnectGeneration = 0
+    /// Reconnecting to the device the window was using: keep the terminal's modes.
+    private var reconnecting = false
+    /// A file panel for a transfer is open. A remote `rz` repeats its ready header while it
+    /// waits, and an `sx` prompt can arrive meanwhile; show one panel at a time.
+    private var transferPanelOpen = false
+    /// Transfers this window started (menus, drops, file prompts) whose `transferStarted`
+    /// hasn't arrived yet. Anything else was started automatically by the remote.
+    private var userStartsPending = 0
+    /// About the running transfer: started by the user, the trace it writes (built-in ZMODEM
+    /// with tracing on), and whether the user cancelled it.
+    private var transferByUser = false
+    private var transferTrace: URL?
+    private var transferCancelled = false
+    /// Set while connection changes are applied without their usual effects.
+    private var restoring = false
+    private var revertingConfig = false
+    private var restoreAllowed = true
+
+    /// Open windows, for confirming before quitting during a transfer.
+    private static let all = NSHashTable<TerminalModel>.weakObjects()
 
     init(settings: AppSettings? = nil) {
         let settings = settings ?? .shared
@@ -57,19 +82,49 @@ final class TerminalModel: ObservableObject {
             // $prefs publishes before the value is stored; apply on the next turn.
             DispatchQueue.main.async { self?.prefsChanged(to: new) }
         }
+        Self.all.add(self)
     }
 
     var isTransferring: Bool { transferStatus != nil }
+    var canStartTransfer: Bool { isConnected && !isTransferring }
+
+    /// Windows with a transfer running.
+    static var transfersRunning: Int { all.allObjects.filter(\.isTransferring).count }
+
+    /// At quit: close every port, so running transfers are cancelled and the devices told to stop.
+    static func disconnectAll() {
+        for model in all.allObjects { model.disconnect() }
+    }
 
     // MARK: Connection
 
     func toggleConnection(ports: [SerialPortInfo]) {
         if isConnected {
             wantConnected = false
+            reconnectGeneration += 1
             disconnect()
         } else {
             connect(ports: ports)
         }
+    }
+
+    /// The user picked a port in the toolbar.
+    func choosePort(_ path: String?) {
+        guard path != connection.portPath else { return }
+        var c = connection
+        c.setPort(path, info: knownPorts.first { $0.path == path })
+        connection = c  // connects via connectionChanged
+    }
+
+    /// A window reopened at launch gets its own settings back (without connecting); new windows
+    /// start from the most recently used ones instead.
+    func restore(_ saved: ConnectionSettings) {
+        guard restoreAllowed else { return }
+        restoreAllowed = false
+        restoring = true
+        connection = saved
+        restoring = false
+        applyTerminalPrefs()
     }
 
     func connect(ports: [SerialPortInfo]) {
@@ -78,6 +133,7 @@ final class TerminalModel: ObservableObject {
             return
         }
         disconnect()
+        restoreAllowed = false
 
         let port = SerialPort(path: path, config: connection.config)
         let session = Session(port: port, downloadDirectory: prefs.downloadDirectory)
@@ -89,8 +145,13 @@ final class TerminalModel: ObservableObject {
         session.pacing = connection.pacing
         session.zmodemReceiveCommand = connection.zmodemReceiveCommand
         session.onDisplay = { [display] data in display.append(data) }
-        session.onEvent = { [weak self] event in
-            Task { @MainActor in self?.handle(event) }
+        session.onEvent = { [weak self, weak session] event in
+            Task { @MainActor in
+                // Late events from a session this window has closed or replaced are stale: a
+                // `disconnected` from the old port must not close the new one.
+                guard let self, let session, self.session === session else { return }
+                self.handle(event)
+            }
         }
 
         do {
@@ -103,23 +164,37 @@ final class TerminalModel: ObservableObject {
         self.session = session
         isConnected = true
         wantConnected = true
+        reconnectGeneration += 1
         statusMessage = "Connected"
+        // Modes the previous device turned on would otherwise apply to this one.
+        if !reconnecting { resetTerminalModes() }
         banner("Connected: \(path.replacingOccurrences(of: "/dev/", with: "")) \(connection.config.summary)")
         focusTerminal()
-        if let sn = ports.first(where: { $0.path == path })?.usbSerialNumber {
-            connection.portSerialNumber = sn
+        if let info = ports.first(where: { $0.path == path }),
+           info.usbSerialNumber != connection.portSerialNumber || info.usbInterface != connection.portInterface {
+            // Remember which adapter this is, including that it has no serial number.
+            var c = connection
+            c.setPort(path, info: info)
+            connection = c
         }
         if prefs.loggingEnabled { startLogging() }
     }
 
     func disconnect() {
+        // The device's last output goes before the banner.
+        display.flushNow()
         if session != nil { banner("Disconnected") }
         session?.stopLogging()
-        session?.close()
+        session?.close()  // cancels a running transfer and tells the remote to stop
         session = nil
         isConnected = false
         logURL = nil
+        logProblem = nil
         transferStatus = nil
+        transferByUser = false
+        transferTrace = nil
+        transferCancelled = false
+        userStartsPending = 0
         pacedRemaining = 0
         pacedEchoMissing = false
         statusMessage = "Not connected"
@@ -128,25 +203,47 @@ final class TerminalModel: ObservableObject {
     /// Called with the initial port list and whenever it changes (hot-plug).
     func portsChanged(_ ports: [SerialPortInfo]) {
         knownPorts = ports
+        reconnectGeneration += 1  // starts over: any pending retry stands down
+        reconnectIfWanted(attempt: 0)
+    }
+
+    private func reconnectIfWanted(attempt: Int) {
         guard prefs.autoReconnect, wantConnected, !isConnected else { return }
-        // Prefer the same physical dongle, which may come back under a different path.
-        let match = ports.first { p in
-            if let sn = connection.portSerialNumber, !sn.isEmpty { return p.usbSerialNumber == sn }
-            return p.path == connection.portPath
-        }
-        guard let match else { return }
+        // The same physical device, which may come back under a different path.
+        guard let match = SerialPortInfo.find(path: connection.portPath, serialNumber: connection.portSerialNumber,
+                                              interface: connection.portInterface, in: knownPorts) else { return }
+        reconnecting = true
         if connection.portPath != match.path {
-            connection.portPath = match.path  // connects via connectionChanged
+            var c = connection
+            c.setPort(match.path, info: match)
+            connection = c  // connects via connectionChanged
         } else {
-            connect(ports: ports)
+            connect(ports: knownPorts)
         }
-        if isConnected { statusMessage = "Reconnected" }
+        reconnecting = false
+        if isConnected {
+            statusMessage = "Reconnected"
+            return
+        }
+        // Still wanted (connectionChanged clears it when the path changes). A device that has just
+        // appeared may not be ready, and no further hot-plug event may come, so retry a few times.
+        wantConnected = true
+        guard attempt < 3 else { return }
+        let generation = reconnectGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self, self.reconnectGeneration == generation else { return }
+            self.reconnectIfWanted(attempt: attempt + 1)
+        }
     }
 
     // MARK: Terminal I/O
 
-    func sendFromTerminal(_ bytes: ArraySlice<UInt8>) {
+    /// Bytes from the terminal view. `fromUser` is false for replies the terminal makes by itself
+    /// (focus and mouse reports, answers to queries): those go to a connected device, but must not
+    /// reconnect a window the user disconnected.
+    func sendFromTerminal(_ bytes: ArraySlice<UInt8>, fromUser: Bool) {
         if session == nil {
+            guard fromUser else { return }
             // Typing at a disconnected terminal connects to the selected port, then sends the key.
             if connection.portPath != nil { connect(ports: knownPorts) }
             guard session != nil else {
@@ -175,6 +272,10 @@ final class TerminalModel: ObservableObject {
         terminalView?.feed(text: "\r\n\u{1b}[2m[\(text)]\u{1b}[0m\r\n")
     }
 
+    private func resetTerminalModes() {
+        terminalView?.feed(text: TerminalModeReset.sequence)
+    }
+
     func terminalResized(cols: Int, rows: Int) {
         self.cols = cols
         self.rows = rows
@@ -190,6 +291,7 @@ final class TerminalModel: ObservableObject {
     }
 
     func sendBreak() {
+        guard !isTransferring else { return }
         session?.port.sendBreak()
     }
 
@@ -198,6 +300,22 @@ final class TerminalModel: ObservableObject {
     }
 
     // MARK: Logging
+
+    /// What the Log button shows.
+    enum LogState: Equatable {
+        case off
+        /// On; a log starts when the window connects.
+        case waiting
+        case recording(URL)
+        /// On, connected, but no log is open.
+        case failed(String)
+    }
+
+    var logState: LogState {
+        guard prefs.loggingEnabled else { return .off }
+        if let logURL { return .recording(logURL) }
+        return isConnected ? .failed(logProblem ?? "No log is open") : .waiting
+    }
 
     func toggleLogging() {
         settings.prefs.loggingEnabled.toggle()
@@ -208,7 +326,9 @@ final class TerminalModel: ObservableObject {
         let url = prefs.logDirectory.appendingPathComponent(SessionLogger.defaultFileName())
         do {
             logURL = try session.startLogging(to: url)
+            logProblem = nil
         } catch {
+            logProblem = "Cannot open a log in \(prefs.logDirectory.path): \(error.localizedDescription)"
             statusMessage = "Cannot open log: \(error.localizedDescription)"
         }
     }
@@ -229,7 +349,11 @@ final class TerminalModel: ObservableObject {
     }
 
     func sendFiles(_ urls: [URL]) {
-        guard isConnected, !isTransferring else { return }
+        guard canStartTransfer, !transferPanelOpen else {
+            NSSound.beep()
+            statusMessage = isConnected ? "A transfer is already running" : "Connect before dropping files to send"
+            return
+        }
         startTransfer(.zmodemSend(urls))
     }
 
@@ -254,6 +378,8 @@ final class TerminalModel: ObservableObject {
     }
 
     func cancelTransfer() {
+        guard isTransferring else { return }
+        transferCancelled = true
         session?.cancelTransfer()
     }
 
@@ -267,11 +393,20 @@ final class TerminalModel: ObservableObject {
     }
 
     private func startTransfer(_ kind: TransferKind, startRemote: Bool = false) {
-        guard let session else { return }
+        guard let session else {
+            statusMessage = "Not connected"
+            NSSound.beep()
+            return
+        }
         do {
             try session.startTransfer(kind, startRemote: startRemote)
+            userStartsPending += 1
+        } catch is Session.TransferStartFailed {
+            userStartsPending += 1  // reported by its transferStarted and transferFinished
         } catch {
+            // Refused (one is already running) or couldn't be set up; nothing else reports it.
             statusMessage = "\(error)"
+            NSSound.beep()
         }
     }
 
@@ -291,11 +426,21 @@ final class TerminalModel: ObservableObject {
         }
     }
 
+    /// Shows a transfer's file panel, one at a time (see `transferPanelOpen`).
     private func present(_ panel: NSSavePanel, then: @escaping (Bool) -> Void) {
+        guard !transferPanelOpen else {
+            NSSound.beep()
+            return
+        }
+        transferPanelOpen = true
+        let done: (Bool) -> Void = { [weak self] ok in
+            self?.transferPanelOpen = false
+            then(ok)
+        }
         if let window = terminalView?.window {
-            panel.beginSheetModal(for: window) { then($0 == .OK) }
+            panel.beginSheetModal(for: window) { done($0 == .OK) }
         } else {
-            then(panel.runModal() == .OK)
+            done(panel.runModal() == .OK)
         }
     }
 
@@ -305,21 +450,38 @@ final class TerminalModel: ObservableObject {
         switch event {
         case let .transferStarted(name):
             transferStatus = name
-            if let url = session?.lastTraceURL { lastTraceURL = url }
+            transferByUser = userStartsPending > 0
+            userStartsPending = max(0, userStartsPending - 1)
+            transferCancelled = false
+            // A new trace file means this is a built-in ZMODEM transfer that writes one.
+            let trace = session?.lastTraceURL
+            transferTrace = trace != nil && trace != lastTraceURL ? trace : nil
+            if let trace { lastTraceURL = trace }
         case let .transferStatus(line):
             if transferStatus != nil { transferStatus = line }
         case let .transferFinished(success, message):
+            // Without transferStarted first, an automatic start was refused or couldn't be set up.
+            let started = transferStatus != nil
+            let byUser = started && transferByUser, trace = started ? transferTrace : nil
+            let cancelled = started && transferCancelled
             transferStatus = nil
-            let traced = lastTraceURL != nil && !prefs.useLrzszForZmodem && prefs.zmodem.traceLevel != .off
-            statusMessage = success ? message : "Transfer failed: \(message)" + (traced ? " — see Transfer ▸ Open Last ZMODEM Trace" : "")
-            if !success { NSSound.beep() }
+            transferByUser = false
+            transferTrace = nil
+            transferCancelled = false
+            if success {
+                statusMessage = message
+            } else if cancelled {
+                statusMessage = "Transfer cancelled"
+            } else {
+                statusMessage = "Transfer failed: \(message)" + (trace != nil ? " — see Transfer ▸ Open Last ZMODEM Trace" : "")
+                // An automatic transfer is the remote's doing; beep only for one the user asked for.
+                if byUser { NSSound.beep() }
+            }
         case .remoteWaitingForFiles:
-            guard !choosingFilesForRemote else { return }
-            choosingFilesForRemote = true
-            chooseFiles(multiple: true) { [weak self] urls in
-                guard let self else { return }
-                self.choosingFilesForRemote = false
-                guard let session = self.session else { return }
+            guard !transferPanelOpen, let asking = session else { return }
+            chooseFiles(multiple: true) { [weak self, weak asking] urls in
+                // Answer only the session that asked; after a reconnect it may be another device.
+                guard let self, let session = self.session, session === asking else { return }
                 if let urls, !urls.isEmpty {
                     self.startTransfer(.zmodemSend(urls))
                 } else {
@@ -327,12 +489,13 @@ final class TerminalModel: ObservableObject {
                 }
             }
         case .remoteXmodemSending:
+            guard !transferPanelOpen, let asking = session else { return }
             // XMODEM carries no file name, so ask where to save.
             let panel = NSSavePanel()
             panel.directoryURL = prefs.downloadDirectory
             panel.message = "The device is sending a file by XMODEM, which carries no name. Save it as:"
-            present(panel) { [weak self] ok in
-                guard let self, let session = self.session else { return }
+            present(panel) { [weak self, weak asking] ok in
+                guard let self, let session = self.session, session === asking else { return }
                 if ok, let url = panel.url {
                     self.startTransfer(.xmodemReceive(url))
                 } else {
@@ -344,47 +507,72 @@ final class TerminalModel: ObservableObject {
             pacedEchoMissing = echoMissing
         case let .logFailed(message):
             logURL = nil
+            logProblem = "The log stopped: \(message)"
             statusMessage = "Session log stopped: \(message)"
         case let .notice(message):
             statusMessage = message
         case let .disconnected(error):
-            guard session != nil else { return }
+            let stoppedTransfer = isTransferring
             disconnect()
-            if let error { statusMessage = "Disconnected: \(error)" }
+            // The transfer's own finish comes later from a session that is no longer current, so
+            // it is dropped and the reason for the disconnect stays visible.
+            if let error {
+                statusMessage = "Disconnected: \(error)" + (stoppedTransfer ? " — the transfer was stopped" : "")
+            } else if stoppedTransfer {
+                statusMessage = "Disconnected — the transfer was stopped"
+            }
         }
     }
 
     // MARK: Settings
 
     private func connectionChanged(from old: ConnectionSettings) {
-        settings.prefs.lastConnection = connection
+        guard !restoring, !revertingConfig else { return }
         if connection.backspaceSendsControlH != old.backspaceSendsControlH { applyTerminalPrefs() }
         if connection.portPath != old.portPath {
+            settings.prefs.lastConnection = connection
             // Choosing a port connects to it; choosing another switches over.
             wantConnected = false
+            reconnectGeneration += 1
             disconnect()
             if connection.portPath != nil { connect(ports: knownPorts) }
             return
         }
-        guard let session else { return }
-        session.pacing = connection.pacing
-        session.zmodemReceiveCommand = connection.zmodemReceiveCommand
-        if connection.config != old.config {
-            do {
-                try session.port.reconfigure(connection.config)
-                banner(connection.config.summary)
-                focusTerminal()
-            } catch {
-                statusMessage = "\(error)"
+        if let session {
+            session.pacing = connection.pacing
+            session.zmodemReceiveCommand = connection.zmodemReceiveCommand
+            if connection.config != old.config {
+                if isTransferring {
+                    revertConfig(to: old.config, because: "Line settings can't change during a transfer")
+                } else {
+                    do {
+                        try session.port.reconfigure(connection.config)
+                        banner(connection.config.summary)
+                        focusTerminal()
+                    } catch {
+                        // The port kept its settings; show (and save) those, not the refused ones.
+                        revertConfig(to: old.config, because: "\(error)")
+                    }
+                }
             }
         }
+        settings.prefs.lastConnection = connection
+    }
+
+    private func revertConfig(to config: SerialConfig, because reason: String) {
+        statusMessage = "\(reason); still \(config.summary)"
+        NSSound.beep()
+        revertingConfig = true
+        connection.config = config
+        revertingConfig = false
     }
 
     // MARK: Presets
 
     /// The saved preset this window's settings match, if any; one naming this port wins.
     var currentPreset: ConnectionPreset? {
-        prefs.presets.first { $0.matches(connection, includingPort: true) } ?? prefs.presets.first { $0.matches(connection) }
+        prefs.presets.first { $0.port != nil && $0.matches(connection, includingPort: true) }
+            ?? prefs.presets.first { $0.matches(connection) }
     }
 
     func applyPreset(_ preset: ConnectionPreset) {
@@ -393,10 +581,14 @@ final class TerminalModel: ObservableObject {
         var missing: PresetPort?
         if let port = preset.port {
             // Prefer the same device or adapter, wherever it is now.
-            let found = port.find(in: knownPorts)
-            if found == nil { missing = port }
-            c.portPath = found?.path ?? port.path
-            c.portSerialNumber = found?.usbSerialNumber ?? port.serialNumber
+            if let found = port.find(in: knownPorts) {
+                c.setPort(found.path, info: found)
+            } else {
+                missing = port
+                c.portPath = port.path
+                c.portSerialNumber = port.serialNumber
+                c.portInterface = port.interface
+            }
         }
         connection = c  // one change: a new port connects, the same port is reconfigured
         if let missing {
@@ -410,7 +602,7 @@ final class TerminalModel: ObservableObject {
     var currentPresetPort: PresetPort? {
         guard let path = connection.portPath else { return nil }
         if let info = knownPorts.first(where: { $0.path == path }) { return PresetPort(info) }
-        return PresetPort(path: path, serialNumber: connection.portSerialNumber)
+        return PresetPort(path: path, serialNumber: connection.portSerialNumber, interface: connection.portInterface)
     }
 
     /// Save this window's settings under `name`, replacing a preset of that name.
@@ -438,9 +630,12 @@ final class TerminalModel: ObservableObject {
             if new.loggingEnabled != old.loggingEnabled || new.logDirectory != old.logDirectory {
                 session.stopLogging()
                 logURL = nil
+                logProblem = nil
                 if new.loggingEnabled { startLogging() }
             }
         }
+        // Only on a change: ⌥⌘O toggles it for one window, and that should stick until then.
+        if new.optionAsMeta != old.optionAsMeta { terminalView?.optionAsMetaKey = new.optionAsMeta }
         applyTerminalPrefs()
     }
 
@@ -453,6 +648,16 @@ final class TerminalModel: ObservableObject {
     }
 
     enum BatchProtocol { case zmodem, ymodem }
+}
+
+/// Turns off what a previous device may have left on: mouse and focus reports, bracketed paste,
+/// the kitty keyboard protocol (in both screens), the alternate screen; then DECSTR. Fed to the
+/// terminal locally, never sent. Leaving the alternate screen (1049) restores the cursor saved
+/// in the normal screen; saving it first (ESC 7) keeps it in place when that screen is in use.
+enum TerminalModeReset {
+    static let sequence = "\u{1b}[<99u\u{1b}7\u{1b}[?1049l\u{1b}[<99u"
+        + [1000, 1002, 1003, 1004, 1005, 1006, 1015, 1016, 2004].map { "\u{1b}[?\($0)l" }.joined()
+        + "\u{1b}[!p"
 }
 
 /// Collects bytes arriving on the serial read queue and hands them to the terminal on
@@ -471,12 +676,18 @@ private final class DisplayBuffer: @unchecked Sendable {
         }
         guard needsSchedule else { return }
         DispatchQueue.main.async { [self] in
-            let bytes: [UInt8] = lock.withLock {
-                scheduled = false
-                defer { pending.removeAll(keepingCapacity: true) }
-                return pending
-            }
-            MainActor.assumeIsolated { flush?(bytes) }
+            MainActor.assumeIsolated { flushNow() }
         }
+    }
+
+    /// Hands over what has arrived so far (the scheduled flush then finds nothing).
+    @MainActor
+    func flushNow() {
+        let bytes: [UInt8] = lock.withLock {
+            scheduled = false
+            defer { pending.removeAll(keepingCapacity: true) }
+            return pending
+        }
+        if !bytes.isEmpty { flush?(bytes) }
     }
 }

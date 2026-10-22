@@ -10,6 +10,8 @@ struct ContentView: View {
     // Not SwiftUI's `State`: in the macOS 27 SDK it is a macro whose compiler plugin ships only
     // with Xcode, and SerialTerm builds with the Command Line Tools alone. CI rejects it.
     @StateObject private var popovers = PopoverState()
+    /// This window's port and line settings, so a window reopened at launch gets its own back.
+    @SceneStorage("connection") private var savedConnection = Data()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -24,9 +26,22 @@ struct ContentView: View {
         }
         .frame(minWidth: 720, idealWidth: 860, minHeight: 360, idealHeight: 560)
         .toolbar { toolbar }
-        .onAppear { model.portsChanged(scanner.ports) }
+        .onAppear {
+            if let saved = try? JSONDecoder().decode(ConnectionSettings.self, from: savedConnection) {
+                model.restore(saved)
+            }
+            saveConnection(model.connection)
+            model.portsChanged(scanner.ports)
+        }
         .onChange(of: scanner.ports) { _, ports in model.portsChanged(ports) }
+        .onChange(of: model.connection) { _, connection in saveConnection(connection) }
+        // Closing the window would cut the transfer off; cancel it first (quitting asks).
+        .windowDismissBehavior(model.isTransferring ? .disabled : .automatic)
         .navigationTitle(windowTitle)
+    }
+
+    private func saveConnection(_ connection: ConnectionSettings) {
+        savedConnection = (try? JSONEncoder().encode(connection)) ?? Data()
     }
 
     private var windowTitle: String {
@@ -39,7 +54,7 @@ struct ContentView: View {
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         ToolbarItemGroup(placement: .navigation) {
-            Picker("Port", selection: $model.connection.portPath) {
+            Picker("Port", selection: Binding(get: { model.connection.portPath }, set: { model.choosePort($0) })) {
                 Text("Choose port…").tag(String?.none)
                 ForEach(scanner.ports) { port in
                     Text(port.displayName).tag(String?.some(port.path))
@@ -51,9 +66,12 @@ struct ContentView: View {
             }
             .frame(maxWidth: 260)
             .help("Serial port")
+            .disabled(model.isTransferring)
 
             baudPicker
+                .disabled(model.isTransferring)
             presetMenu
+                .disabled(model.isTransferring)
 
             Button {
                 model.toggleConnection(ports: scanner.ports)
@@ -67,13 +85,7 @@ struct ContentView: View {
 
         ToolbarItemGroup(placement: .primaryAction) {
             transferMenu
-            Button {
-                model.toggleLogging()
-            } label: {
-                Label("Log", systemImage: model.prefs.loggingEnabled ? "record.circle.fill" : "record.circle")
-            }
-            .foregroundStyle(model.prefs.loggingEnabled ? Color.red : Color.primary)
-            .help(model.prefs.loggingEnabled ? "Stop logging" : "Start logging (folder is set in Settings)")
+            logButton
 
             lineMenu
             Button {
@@ -82,6 +94,7 @@ struct ContentView: View {
                 Label("Line Settings", systemImage: "slider.horizontal.3")
             }
             .help("Data bits, parity, stop bits, flow control, Backspace key, typing pace")
+            .disabled(model.isTransferring)
             .popover(isPresented: $popovers.showLineSettings, arrowEdge: .bottom) {
                 LineSettingsView(config: $model.connection.config,
                                  backspaceSendsControlH: $model.connection.backspaceSendsControlH,
@@ -89,6 +102,28 @@ struct ContentView: View {
                                  zmodemReceiveCommand: $model.connection.zmodemReceiveCommand)
             }
         }
+    }
+
+    private var logButton: some View {
+        let state = model.logState
+        let icon: String, color: Color, help: String
+        switch state {
+        case .off:
+            (icon, color, help) = ("record.circle", .primary, "Start logging (folder is set in Settings)")
+        case .waiting:
+            (icon, color, help) = ("record.circle.fill", .secondary, "Logging is on: a log starts when you connect. Click to turn it off.")
+        case .recording:
+            (icon, color, help) = ("record.circle.fill", .red, "Stop logging")
+        case let .failed(problem):
+            (icon, color, help) = ("exclamationmark.triangle", .orange, "Logging is on, but this window has no log: \(problem). Click to turn logging off.")
+        }
+        return Button {
+            model.toggleLogging()
+        } label: {
+            Label("Log", systemImage: icon)
+        }
+        .foregroundStyle(color)
+        .help(help)
     }
 
     private var baudPicker: some View {
@@ -105,6 +140,7 @@ struct ContentView: View {
             Divider()
             Button("Custom…") {
                 popovers.customBaud = "\(current)"
+                popovers.customBaudInvalid = false
                 popovers.showCustomBaud = true
             }
         } label: {
@@ -113,21 +149,31 @@ struct ContentView: View {
         .frame(minWidth: 120)
         .help("Baud rate")
         .popover(isPresented: $popovers.showCustomBaud, arrowEdge: .bottom) {
-            HStack {
-                TextField("Baud rate", text: $popovers.customBaud)
-                    .frame(width: 120)
-                    .onSubmit(applyCustomBaud)
-                Button("Set", action: applyCustomBaud)
-                    .keyboardShortcut(.defaultAction)
+            VStack(alignment: .leading) {
+                HStack {
+                    TextField("Baud rate", text: $popovers.customBaud)
+                        .frame(width: 120)
+                        .onSubmit(applyCustomBaud)
+                    Button("Set", action: applyCustomBaud)
+                        .keyboardShortcut(.defaultAction)
+                }
+                if popovers.customBaudInvalid {
+                    Text("Type a whole number of baud, digits only, e.g. 250000")
+                        .font(.callout)
+                        .foregroundStyle(.red)
+                }
             }
             .padding()
+            .onChange(of: popovers.customBaud) { popovers.customBaudInvalid = false }
         }
     }
 
     private func applyCustomBaud() {
-        if let rate = Int(popovers.customBaud.filter(\.isNumber)), rate > 0 {
-            model.connection.config.baudRate = rate
+        guard let rate = SerialConfig.parseBaudRate(popovers.customBaud) else {
+            popovers.customBaudInvalid = true
+            return
         }
+        model.connection.config.baudRate = rate
         popovers.showCustomBaud = false
     }
 
@@ -192,18 +238,21 @@ struct ContentView: View {
 
     private var transferMenu: some View {
         Menu {
-            Section("ZMODEM") {
-                Button("Send Files…") { model.sendFiles(.zmodem) }
-                Button("Receive") { model.receiveZmodem() }
+            Group {
+                Section("ZMODEM") {
+                    Button("Send Files…") { model.sendFiles(.zmodem) }
+                    Button("Receive") { model.receiveZmodem() }
+                }
+                Section("YMODEM") {
+                    Button("Send Files…") { model.sendFiles(.ymodem) }
+                    Button("Receive") { model.receiveYmodem() }
+                }
+                Section("XMODEM") {
+                    Button("Send File…") { model.sendXmodem() }
+                    Button("Receive As…") { model.receiveXmodem() }
+                }
             }
-            Section("YMODEM") {
-                Button("Send Files…") { model.sendFiles(.ymodem) }
-                Button("Receive") { model.receiveYmodem() }
-            }
-            Section("XMODEM") {
-                Button("Send File…") { model.sendXmodem() }
-                Button("Receive As…") { model.receiveXmodem() }
-            }
+            .disabled(!model.canStartTransfer)
             Divider()
             Button("Cancel Transfer") { model.cancelTransfer() }
                 .disabled(!model.isTransferring)
@@ -219,6 +268,7 @@ struct ContentView: View {
     private var lineMenu: some View {
         Menu {
             Button("Send Break") { model.sendBreak() }
+                .disabled(!model.isConnected || model.isTransferring)
             Button("Send Window Size (stty)") { model.sendWindowSize() }
             Divider()
             Button("Clear Screen") { model.clearScreen() }
@@ -236,8 +286,8 @@ struct ContentView: View {
                 Text("Not connected to \(name)").lineLimit(1).truncationMode(.middle)
                 Spacer()
                 Text("Type to connect, or").foregroundStyle(.secondary)
+                // No Return shortcut: Return typed in the terminal should connect and reach the device.
                 Button("Connect") { model.toggleConnection(ports: scanner.ports) }
-                    .keyboardShortcut(.defaultAction)
                     .controlSize(.large)
             } else {
                 Text(scanner.ports.isEmpty ? "No serial ports found — plug in an adapter" : "Choose a port in the toolbar to connect")
@@ -283,6 +333,11 @@ struct ContentView: View {
 
             Spacer()
 
+            if case let .failed(problem) = model.logState {
+                Label("Not logging", systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+                    .help(problem + ". Turn logging off and on to try again.")
+            }
             if let log = model.logURL {
                 Button {
                     model.revealLog()
@@ -314,8 +369,9 @@ struct ContentView: View {
 private final class PopoverState: ObservableObject {
     @Published var showLineSettings = false
     @Published var showCustomBaud = false
-    /// The custom-baud field's text.
+    /// The custom-baud field's text, and whether "Set" found it unusable.
     @Published var customBaud = ""
+    @Published var customBaudInvalid = false
     @Published var showSavePreset = false
     /// The save-preset field's text.
     @Published var presetName = ""
@@ -425,10 +481,16 @@ struct SettingsWindow: View {
         TabView {
             Form {
                 Section("Display") {
-                    Stepper("Font size: \(Int(settings.prefs.fontSize)) pt", value: $settings.prefs.fontSize, in: 8...36)
+                    Stepper("Font size: \(Int(settings.prefs.fontSize)) pt", value: $settings.prefs.fontSize, in: Preferences.fontSizes)
                 }
                 Section("Connection") {
                     Toggle("Reconnect when the adapter is plugged back in", isOn: $settings.prefs.autoReconnect)
+                }
+                Section {
+                    Toggle("Use Option as Meta key", isOn: $settings.prefs.optionAsMeta)
+                } footer: {
+                    Text("On: Option-key combinations send Esc and the key, as shells and editors expect. Off: Option types the characters on your keyboard layout, such as @ or | on many European layouts. ⌥⌘O switches it for one window until the setting changes.")
+                        .foregroundStyle(.secondary)
                 }
             }
             .formStyle(.grouped)
@@ -494,14 +556,15 @@ struct SettingsWindow: View {
                     if settings.prefs.presets.isEmpty {
                         Text("No presets yet.").foregroundStyle(.secondary)
                     }
-                    ForEach($settings.prefs.presets) { $preset in
+                    // By id, not bindings into the array: a row's text field may still be editing
+                    // when another row is deleted.
+                    ForEach(settings.prefs.presets) { preset in
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
-                                TextField("Name", text: $preset.name)
-                                    .labelsHidden()
+                                PresetNameField(settings: settings, id: preset.id, name: preset.name)
                                 Text(preset.summary).font(.callout).monospacedDigit().foregroundStyle(.secondary)
                             }
-                            PresetPortPicker(port: $preset.port, ports: scanner.ports)
+                            PresetPortPicker(port: presetPortBinding(preset.id), ports: scanner.ports)
                                 .frame(width: 200)
                             Button {
                                 settings.prefs.presets.removeAll { $0.id == preset.id }
@@ -537,6 +600,45 @@ struct SettingsWindow: View {
         }
         .frame(width: 560, height: 520)
     }
+
+    private func presetPortBinding(_ id: UUID) -> Binding<PresetPort?> {
+        Binding(
+            get: { settings.prefs.presets.first { $0.id == id }?.port },
+            set: { port in
+                if let i = settings.prefs.presets.firstIndex(where: { $0.id == id }) { settings.prefs.presets[i].port = port }
+            }
+        )
+    }
+}
+
+/// A preset's name in Settings. Takes a name only when it's allowed (not empty, not another
+/// preset's) and says why otherwise; the saved name stays as it was.
+private struct PresetNameField: View {
+    @ObservedObject var settings: AppSettings
+    let id: UUID
+    let name: String
+    @StateObject private var draft = TextDraft()
+
+    var body: some View {
+        let text = draft.text ?? name
+        let problem = draft.text.flatMap { settings.prefs.presetNameProblem($0, for: id) }
+        VStack(alignment: .leading, spacing: 2) {
+            TextField("Name", text: Binding(get: { text }, set: { new in
+                draft.text = new
+                settings.prefs.renamePreset(id, to: new)
+            }))
+            .labelsHidden()
+            if let problem {
+                Text(problem).font(.callout).foregroundStyle(.red)
+            }
+        }
+    }
+}
+
+/// Text being edited, before it's accepted (see `PresetNameField`).
+@MainActor
+private final class TextDraft: ObservableObject {
+    @Published var text: String?
 }
 
 /// Chooses a preset's port: none (keep the window's), a plugged-in port, or the saved one while unplugged.

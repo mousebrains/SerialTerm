@@ -13,6 +13,9 @@ struct SerialPortInfo: Identifiable, Hashable {
     var usbVendor: String?
     var usbProduct: String?
     var usbSerialNumber: String?
+    /// The USB interface the port belongs to. The ports of a multi-port adapter share the
+    /// device's serial number; this tells them apart.
+    var usbInterface: Int?
     var vendorID: Int?
     var productID: Int?
 
@@ -26,6 +29,31 @@ struct SerialPortInfo: Identifiable, Hashable {
         var name = usbProduct ?? usbVendor ?? "USB serial"
         if let sn = usbSerialNumber, !sn.isEmpty { name += " – \(sn)" }
         return "\(name)  (\(shortPath))"
+    }
+
+    /// The port in `ports` that is the one remembered as `path`, `serialNumber` and `interface`.
+    /// The same name with the same (or no recorded) serial number comes first: the device hasn't
+    /// moved. Otherwise the serial number is followed to a new name, but only when that is
+    /// unambiguous, since every port of a multi-port adapter has the same one.
+    static func find(path: String?, serialNumber: String?, interface: Int?, in ports: [SerialPortInfo]) -> SerialPortInfo? {
+        let serialNumber = serialNumber.nonEmpty
+        if let path, let p = ports.first(where: { $0.path == path }),
+           serialNumber == nil || p.usbSerialNumber == serialNumber {
+            return p
+        }
+        guard let serialNumber else { return nil }
+        let candidates = ports.filter { p in
+            p.usbSerialNumber == serialNumber && (interface == nil || p.usbInterface == nil || p.usbInterface == interface)
+        }
+        return candidates.count == 1 ? candidates[0] : nil
+    }
+}
+
+extension Optional where Wrapped == String {
+    /// nil for an empty string too (some devices report an empty serial number).
+    var nonEmpty: String? {
+        guard let s = self, !s.isEmpty else { return nil }
+        return s
     }
 }
 
@@ -92,6 +120,7 @@ final class PortScanner: ObservableObject {
             usbVendor: ancestorProperty("USB Vendor Name") as? String,
             usbProduct: ancestorProperty("USB Product Name") as? String,
             usbSerialNumber: ancestorProperty("USB Serial Number") as? String,
+            usbInterface: (ancestorProperty("bInterfaceNumber") as? NSNumber)?.intValue,
             vendorID: (ancestorProperty("idVendor") as? NSNumber)?.intValue,
             productID: (ancestorProperty("idProduct") as? NSNumber)?.intValue
         )

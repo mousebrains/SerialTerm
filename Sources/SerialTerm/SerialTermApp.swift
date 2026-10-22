@@ -23,6 +23,7 @@ struct SerialTermApp: App {
     }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Writing to a transfer program that has just exited must not kill the app.
@@ -34,5 +35,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let running = TerminalModel.transfersRunning
+        guard running > 0 else { return .terminateNow }
+        let alert = NSAlert()
+        alert.messageText = running == 1 ? "A file transfer is running" : "\(running) file transfers are running"
+        alert.informativeText = "Quitting cancels it and tells the device to stop."
+        alert.addButton(withTitle: "Keep Running")
+        alert.addButton(withTitle: "Quit")
+        return alert.runModal() == .alertSecondButtonReturn ? .terminateNow : .terminateCancel
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // Windows aren't torn down at quit: close the ports now, so a transfer is cancelled
+        // cleanly and each log gets its closing line.
+        TerminalModel.disconnectAll()
     }
 }

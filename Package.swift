@@ -23,6 +23,8 @@ let package = Package(
             ]
         ),
         .testTarget(name: "SerialCoreTests", dependencies: ["SerialCore"]),
+        // The app's pure logic: port matching, preference decoding, input parsing.
+        .testTarget(name: "SerialTermTests", dependencies: ["SerialTerm"]),
     ],
     swiftLanguageModes: [.v5]
 )

@@ -19,9 +19,9 @@ struct TerminalContainer: NSViewRepresentable {
             font: NSFont.monospacedSystemFont(ofSize: model.prefs.fontSize, weight: .regular)
         )
         view.terminalDelegate = context.coordinator
-        view.optionAsMetaKey = true
         view.onDropFiles = { [weak model] urls in model?.sendFiles(urls) }
-        model.terminalView = view
+        view.onTerminalSend = { [weak model] data, fromUser in model?.sendFromTerminal(data, fromUser: fromUser) }
+        model.terminalView = view  // applies Option-as-Meta, Backspace and font settings
         DispatchQueue.main.async { view.window?.makeFirstResponder(view) }
         return view
     }
@@ -36,8 +36,9 @@ struct TerminalContainer: NSViewRepresentable {
             self.model = model
         }
 
+        /// Keys and typed text (replies and pastes come through `SerialTerminalView.onTerminalSend`).
         func send(source: TerminalView, data: ArraySlice<UInt8>) {
-            model.sendFromTerminal(data)
+            model.sendFromTerminal(data, fromUser: true)
         }
 
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
@@ -51,9 +52,31 @@ struct TerminalContainer: NSViewRepresentable {
     }
 }
 
-/// Terminal view that accepts files dropped on it (sent with ZMODEM).
+/// Terminal view that accepts files dropped on it (sent with ZMODEM), and tells what the user
+/// typed or pasted apart from replies the terminal makes by itself.
 final class SerialTerminalView: TerminalView {
     var onDropFiles: (([URL]) -> Void)?
+    /// Bytes the terminal produced by itself (answers to queries, focus and mouse reports), or a
+    /// paste (`fromUser`). Keys and typed text go to the delegate's `send` instead.
+    var onTerminalSend: ((_ data: ArraySlice<UInt8>, _ fromUser: Bool) -> Void)?
+
+    private var pasting = false
+
+    override func paste(_ sender: Any) {
+        pasting = true
+        defer { pasting = false }
+        super.paste(sender)
+    }
+
+    // SwiftTerm routes its replies, and pasted text, through here; it may call from its parsing
+    // thread. Delivered on the main queue later, as SwiftTerm itself does.
+    nonisolated override func send(source: Terminal, data: ArraySlice<UInt8>) {
+        let bytes = Array(data)
+        let fromUser = Thread.isMainThread && MainActor.assumeIsolated { pasting }
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated { self?.onTerminalSend?(bytes[...], fromUser) }
+        }
+    }
 
     override init(frame: CGRect, font: NSFont?) {
         super.init(frame: frame, font: font)
