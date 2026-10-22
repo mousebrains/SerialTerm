@@ -14,21 +14,32 @@
    by product name and serial number, for example `FT232R USB UART – A50285BI (cu.usbserial-A50285BI)`.
    **Choosing a port connects to it**, and choosing another switches to it.
 2. **Choose the baud rate** from the baud menu. Choose **Custom…** to enter any rate the adapter
-   supports.
+   supports, as digits only (`250000`, not `250,000` or `2.5e5`).
 3. **Adjust the line settings** (data bits, parity, stop bits, flow control, and what the
    Backspace key sends) with the slider button. The default is 8N1 with no flow control and
-   Backspace sending DEL. Changes to an open connection take effect immediately.
+   Backspace sending DEL. Changes to an open connection take effect immediately. If the adapter's
+   driver refuses a setting (not every adapter can do every rate), the status bar says so and the
+   window goes back to the settings the port is still using.
 
 While disconnected, a bar across the top of the terminal shows the selected port and a
-**Connect** button. **Typing at a disconnected terminal connects first**, then sends the key, so
-pressing Return is usually all you need. **⇧⌘K** connects and disconnects.
+**Connect** button. **Typing (or pasting) at a disconnected terminal connects first**, then sends
+the key, so pressing Return is usually all you need. **⇧⌘K** connects and disconnects. Only what
+you type or paste connects: replies the terminal sends by itself, such as mouse-click or window
+focus reports a program on the device asked for, don't reopen a port you disconnected.
+
+Each new connection starts the terminal with its default modes, so a mode one device turned on
+(mouse reporting, bracketed paste, the alternate screen) doesn't carry over to the next.
 
 The terminal shows dim local lines such as `[Connected: usbserial-A50285BI 115200 8N1]` and
 `[Disconnected]`. They are displayed only and never sent to the device.
 
 **Reconnect after unplugging**: if the adapter is unplugged while connected, SerialTerm reconnects
 when the same adapter (matched by USB serial number) is plugged back in, even under a different
-`/dev` name. You can turn this off in Settings ▸ General.
+`/dev` name. The ports of a multi-port adapter share one serial number, so SerialTerm also matches
+the port's USB interface, and it doesn't reconnect when it can't tell which port was yours.
+Adapters without a serial number are matched by `/dev` name only. If the device isn't ready when
+it reappears, SerialTerm tries again for a few seconds. You can turn reconnecting off in Settings ▸
+General.
 
 **Paced typing**: some device command lines drop characters that arrive faster than they can
 parse them, typically above 10–50 characters a second, which garbles pasted commands. Under the
@@ -52,7 +63,8 @@ The commands SerialTerm types to start a transfer on the device (`rb`, `rx name`
 receive command) go out at the same pace.
 
 **Several devices**: each window (**⌘N**) has its own port and line settings. New windows start
-with the settings used most recently.
+with the settings used most recently; windows that macOS reopens at launch get their own back
+(they don't connect until you type or click Connect).
 
 ### Presets
 
@@ -62,13 +74,14 @@ receiver (`rz` or `zr`). It can also include a port.
 
 - **Save**: set up a window, then choose **Presets ▸ Save Current Settings as Preset…** and give
   it a name. Turn on **Include port** to save the window's port with it. Saving under an existing
-  name replaces that preset.
+  name replaces that preset. Each preset has its own, non-empty name.
 - **Apply**: choose the preset from the **Presets** menu. It applies to that window only, and
   immediately if the window is connected. A preset with a port also switches the window to that
   port, which connects to it.
 - A saved port is found again by its USB serial number, so the preset follows whatever carries
   the USB serial chip, even if macOS gives it a different `/dev` name. That is the instrument
-  when it has its own USB port, or the USB adapter when the instrument is wired to one.
+  when it has its own USB port, or the USB adapter when the instrument is wired to one. On a
+  multi-port adapter, the preset remembers which of its ports it was.
 - Choosing another port in the toolbar afterwards is fine; it doesn't change the preset.
 - The menu's title shows the preset the window's settings match, or *Presets* if none does.
 - **Rename, reorder, delete, or change a preset's port** in **Settings ▸ Presets**. Set the port
@@ -102,12 +115,16 @@ Above about 1 Mbaud, use RTS/CTS flow control if the device supports it.
 | Baud menu | Common rates, or Custom… |
 | Presets menu | Apply, save or delete a [preset](#presets) |
 | ⚡ Connect / Disconnect | ⇧⌘K |
-| Transfer menu | ZMODEM / YMODEM / XMODEM send and receive, Cancel Transfer, Open Last ZMODEM Trace, Show Download Folder |
-| ● Log | Turn session logging on or off (red while logging) |
+| Transfer menu | ZMODEM / YMODEM / XMODEM send and receive (while connected and no transfer is running), Cancel Transfer, Open Last ZMODEM Trace, Show Download Folder |
+| ● Log | Turn session logging on or off: red while this window is logging, grey while logging is on but the window isn't connected, ⚠ when logging is on but the window couldn't open its log |
 | Line menu | Send Break, Send Window Size (stty), Clear Screen |
 | Slider | Data bits, parity, stop bits, flow control, Backspace key, typing pace, ZMODEM receive command; **More Settings…** |
 
 If the window is narrow, macOS moves some toolbar items behind a `»` button.
+
+**During a transfer** the port, baud, preset and line settings controls are unavailable, and the
+window can't be closed; cancel the transfer first. Quitting SerialTerm during a transfer asks
+first, then cancels it and tells the device to stop.
 
 **Status bar**:
 - connection state and line settings, such as `115200 8N1`;
@@ -120,7 +137,8 @@ If the window is narrow, macOS moves some toolbar items behind a `»` button.
   data rate so far, plus the average pause the remote takes between files, so it suits any
   device;
 - paced typing still to send, with a **Cancel** button, and the pace when it is on;
-- the current log file (click to show it in Finder);
+- the current log file (click to show it in Finder), or **Not logging** when logging is on but
+  this window has no log (hover for the reason; turn logging off and on to try again);
 - `⌫ = ^H` when the Backspace key sends Ctrl-H;
 - the terminal size in columns × rows.
 
@@ -135,6 +153,7 @@ Open with **SerialTerm ▸ Settings…** (⌘,). These settings apply to all win
 **General**
 - *Font size*.
 - *Reconnect when the adapter is plugged back in*.
+- *Use Option as Meta key* (on by default): see [Keyboard](#keyboard).
 
 **Transfers**
 - *Save received files to* (default: Downloads) and *Choose files to send from* (the file picker's
@@ -148,6 +167,7 @@ Open with **SerialTerm ▸ Settings…** (⌘,). These settings apply to all win
 - *ZMODEM diagnostics* and *ZMODEM workarounds*: see [ZMODEM & Diagnostics](zmodem.md).
 
 **Presets**: rename, reorder or delete [presets](#presets), and change or clear each one's port.
+A name that is empty or already used by another preset isn't taken; the field says why.
 
 **Logging**
 - *Log sessions*, which is the same as the toolbar's ● Log button, and *Log folder* (default:
@@ -156,7 +176,9 @@ Open with **SerialTerm ▸ Settings…** (⌘,). These settings apply to all win
 ## Keyboard
 
 - Keys are sent as an xterm would send them: arrows and function keys as escape sequences, and
-  Option as Meta.
+  Option as Meta (Option-x sends Esc x). On layouts that type characters such as `@`, `|` or `~`
+  with Option, turn off *Use Option as Meta key* in Settings ▸ General. ⌥⌘O switches it for the
+  front window until the setting next changes.
 - ⌘C / ⌘V copy and paste. Pasted text is sent to the device.
 - ⇧⌘K connects and disconnects. ⌘N opens a new window. ⌘, opens Settings.
 - Keystrokes are ignored while a file transfer is running, because they would corrupt it.
@@ -220,10 +242,12 @@ files into the download folder.
 - Drop files onto the terminal window.
 
 **Progress** appears in the status bar. **Cancel** (status bar or Transfer menu) stops both ends.
-Disconnecting, or switching the window to another port, during a transfer cancels it and tells
-the device to stop first.
+Disconnecting during a transfer cancels it and tells the device to stop first. If the adapter is
+unplugged during a transfer, the status bar keeps the reason for the disconnect and says the
+transfer was stopped.
 **Results** appear in the status bar when the transfer ends, for example `Received 3 files
-(183 MB)`.
+(183 MB)`. A failure of a built-in ZMODEM transfer that wrote a trace points you to **Open Last
+ZMODEM Trace**. SerialTerm beeps when a transfer you started fails, not for automatic ones.
 
 If automatic start is off, choose **Transfer ▸ ZMODEM ▸ Receive** before running `sz`.
 
@@ -288,6 +312,10 @@ in [ZMODEM & Diagnostics](zmodem.md).
 **A ZMODEM transfer failed or behaved oddly.** Choose **Transfer ▸ Open Last ZMODEM Trace**. The
 [ZMODEM guide](zmodem.md#reading-a-trace) explains how to read it. Trying again with the lrzsz
 setting on helps tell a device quirk from a SerialTerm bug.
+
+**Settings were reset to defaults.** If SerialTerm can't read its saved settings (damaged, or
+written by a newer version), it starts with defaults and keeps the old data in its preferences
+under `preferences.v2.unreadable`. One unreadable preset is skipped on its own; the others load.
 
 **The Edit menu shows Writing Tools / AutoFill.** macOS adds these to any app
 that accepts text input. They have no use in a terminal; ignore them.
