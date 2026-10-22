@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Pat Welch
 
+import AppKit
 import Foundation
 import SerialCore
 import SwiftTerm
@@ -252,5 +253,28 @@ struct PortScannerTests {
         let after = machPortNames()
         #expect(before > 0)
         #expect(after - before < 30, "\(after - before) Mach ports more after 50 scanners came and went")
+    }
+}
+
+@MainActor
+struct TerminalViewWindowTests {
+    /// Closing a window didn't disconnect: the session went when SwiftUI let go of the model, so
+    /// the log missed its closing lines.
+    @Test func closingTheWindowIsReported() {
+        _ = NSApplication.shared
+        let view = SerialTerminalView(frame: NSRect(x: 0, y: 0, width: 200, height: 100), font: nil)
+        var closes = 0
+        view.onWindowClose = { closes += 1 }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100), styleMask: [.titled, .closable],
+                              backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false
+        window.contentView = view
+        let other = NSWindow(contentRect: .zero, styleMask: [.titled, .closable], backing: .buffered, defer: true)
+        other.isReleasedWhenClosed = false
+        other.close()  // another window closing isn't this one
+        #expect(closes == 0)
+        window.close()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        #expect(closes == 1)
     }
 }
