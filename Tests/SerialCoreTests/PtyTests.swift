@@ -206,6 +206,8 @@ struct ZmodemEndToEndTests {
         // XMODEM pads the last 128-byte block with 0x1A.
         #expect(got.prefix(original.count) == original)
         #expect(got.dropFirst(original.count).allSatisfy { $0 == 0x1A })
+        // Marked as downloaded, as the built-in receiver's files are.
+        #expect(try out.resourceValues(forKeys: [.quarantinePropertiesKey]).quarantineProperties?["LSQuarantineAgentName"] as? String == "SerialTerm")
     }
 
     @Test func ymodemSendsABatch() throws {

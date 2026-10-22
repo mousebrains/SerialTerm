@@ -306,5 +306,7 @@ extension ZmodemEndToEndTests {
         let names = try FileManager.default.contentsOfDirectory(atPath: dst.path)
         #expect(names == ["hidden"], "\(names)")
         #expect(try Data(contentsOf: dst.appendingPathComponent("hidden")) == Data("dot file".utf8))
+        let values = try dst.appendingPathComponent("hidden").resourceValues(forKeys: [.quarantinePropertiesKey])
+        #expect(values.quarantineProperties?["LSQuarantineAgentName"] as? String == "SerialTerm", "marked as downloaded")
     }
 }

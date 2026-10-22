@@ -188,6 +188,9 @@ public final class ExternalTransfer: FileTransfer, @unchecked Sendable {
             self.stdoutPipe.fileHandleForReading.readabilityHandler = nil
             self.stderrPipe.fileHandleForReading.readabilityHandler = nil
             let moved = self.moveReceivedFiles()
+            if case let .xmodemReceive(url) = self.kind, FileManager.default.fileExists(atPath: url.path) {
+                ZmodemReceiver.quarantine(url)
+            }
             let ok = p.terminationReason == .exit && p.terminationStatus == 0
             let (cancelled, lastStatus) = self.lock.withLock { (self.cancelled, self.lastStatus) }
             var message: String
@@ -204,8 +207,9 @@ public final class ExternalTransfer: FileTransfer, @unchecked Sendable {
         try process.run()
     }
 
-    /// Moves what lrzsz received into the download folder under safe, unused names.
-    /// Returns the names used where they differ from what the sender sent.
+    /// Moves what lrzsz received into the download folder under safe, unused names, marked as
+    /// downloaded like the built-in receiver's. Returns the names used where they differ from
+    /// what the sender sent.
     private func moveReceivedFiles() -> [String] {
         guard let incoming else { return [] }
         let fm = FileManager.default
@@ -214,6 +218,8 @@ public final class ExternalTransfer: FileTransfer, @unchecked Sendable {
         for name in names.sorted() {
             let source = incoming.appendingPathComponent(name)
             let target = ZmodemReceiver.uniqueURL(in: destination, for: name)
+            // Before the move, so it holds wherever the file ends up.
+            ZmodemReceiver.quarantine(source)
             do {
                 try fm.moveItem(at: source, to: target)
                 if target.lastPathComponent != name { renamed.append("\(name) as \(target.lastPathComponent)") }
