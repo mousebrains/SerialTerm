@@ -144,7 +144,16 @@ public final class Session: @unchecked Sendable {
 
     public func open() throws {
         try port.open()
-        lock.withLock { logger }?.note("Connected \(port.path) \(port.config.summary)")
+        let logger = lock.withLock { self.logger }
+        logger?.note("Connected \(port.path) \(port.config.summary)")
+        for line in port.adapterReport { logger?.note(line) }
+    }
+
+    /// The first lines of every transfer trace: the line, the adapter and driver behind it, and
+    /// the host, since all of them show in a transfer's timing.
+    private func traceHeader() -> [String] {
+        ["port: \(port.path) \(port.config.summary)"] + port.adapterReport
+            + ["host: macOS \(ProcessInfo.processInfo.operatingSystemVersionString)"]
     }
 
     /// Closes the port. A running transfer is cancelled first and the remote told to stop, so
@@ -209,6 +218,10 @@ public final class Session: @unchecked Sendable {
             if stopped { self.onEvent?(.logFailed(error.localizedDescription)) }
         }
         newLogger.note("Log opened; \(port.path) \(port.config.summary); time zone \(TimeZone.current.identifier)")
+        // Started after connecting: `open` wrote the adapter to no log, so write it here.
+        if port.isOpen {
+            for line in port.adapterReport { newLogger.note(line) }
+        }
         lock.withLock { logger = newLogger }
         return newLogger.url
     }
@@ -338,12 +351,15 @@ public final class Session: @unchecked Sendable {
         case .zmodemReceive, .zmodemSend:
             let z = ZmodemTransfer(kind: kind, directory: s.downloadDirectory, options: s.zmodemOptions, traceURL: traceURL,
                                    receiveCommand: s.zmodemReceiveCommand)
+            traceHeader().forEach { z.trace?.note($0) }
             if let primed { z.prime(primed) }
             return z
         default:
-            return XmodemTransfer(kind: kind, directory: s.downloadDirectory, xmodem1K: s.xmodem1K,
-                                  receiveCommand: startRemote ? kind.remoteReceiveCommand : nil,
-                                  traceLevel: s.zmodemOptions.traceLevel, traceURL: traceURL)
+            let x = XmodemTransfer(kind: kind, directory: s.downloadDirectory, xmodem1K: s.xmodem1K,
+                                   receiveCommand: startRemote ? kind.remoteReceiveCommand : nil,
+                                   traceLevel: s.zmodemOptions.traceLevel, traceURL: traceURL)
+            traceHeader().forEach { x.trace?.note($0) }
+            return x
         }
     }
 

@@ -31,6 +31,12 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
   modification times kept, partial files removed, `ZCOMMAND` refused.
 - ZMODEM protocol traces (Frames / Frames + raw bytes), with error snapshots showing the raw bytes
   and serial read timing around each bad subpacket.
+- Transfer traces start with the line settings, the USB adapter, the macOS driver, whether the
+  driver accepted the 1 ms receive-latency request, and the macOS version. The session log gets
+  them on connect, or when recording starts on an open port.
+  - Adapter: product and vendor, VID:PID, chip revision, serial number and USB speed.
+  - Why: adapters differ in how long they hold a partial USB packet, and that shows in transfer
+    timing.
 - ZMODEM workarounds: block size, forced ACK window, force CRC-16, escape all control characters,
   timeout.
 - Native XMODEM (CRC-16 or checksum, 128- or 1024-byte blocks) and YMODEM (batches with names,
