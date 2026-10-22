@@ -478,4 +478,47 @@ struct ZmodemSenderRobustnessTests {
         _ = results.wait(timeout: 20) { !$0.isEmpty }
         #expect(finished, "cancel did not complete while output was blocked")
     }
+
+    /// The file is read as it goes, not mapped (a mapped file on a volume that goes away kills the
+    /// app with SIGBUS). One that shrinks meanwhile fails the send with a message; mapped, the
+    /// bytes it no longer has still went out.
+    @Test func aFileThatShrinksFailsTheSendCleanly() throws {
+        let src = try helper.tempDir(), dst = try helper.tempDir()
+        let files = try helper.makeFiles(in: src, sizes: [2_000_000])
+        var options = ZmodemOptions()
+        options.timeout = 1
+        let sender = ZmodemTransfer(kind: .zmodemSend(files), directory: dst, options: options)
+        let fake = FakeReceiver()
+        let line = SlowLine(bytesPerSecond: 200_000) { fake.feed($0) }
+        defer { line.stop(); fake.stop() }
+        fake.send = { sender.feed($0) }
+        sender.onOutput = { line.write($0) }
+        sender.waitForOutput = { line.waitForPending($0) }
+        sender.discardOutput = { line.discard() }
+        let results = Inbox<(Bool, String)>()
+        sender.onFinish = { results.add(($0, $1)) }
+        fake.start()
+        try sender.start()
+        let deadline = Date().addingTimeInterval(10)
+        while line.delivered < 20_000 && Date() < deadline { usleep(10_000) }
+        #expect(truncate(files[0].path, 100_000) == 0)
+        #expect(results.wait(timeout: 20) { !$0.isEmpty })
+        let r = try #require(results.all.first)
+        #expect(!r.0)
+        #expect(r.1.contains("changed while being sent"), "\(r.1)")
+    }
+
+    @Test func fileReadsAreCachedAndChecked() throws {
+        let src = try helper.tempDir()
+        let url = try helper.makeFiles(in: src, sizes: [200_000])[0]
+        let data = try Data(contentsOf: url)
+        let file = try SendFile(url)
+        #expect(file.count == data.count)
+        for range in [0..<1024, 1024..<2048, 70_000..<71_024, 512..<1536, 199_000..<200_000, 200_000..<200_000] {
+            #expect(try file.bytes(range) == data[range], "\(range)")
+        }
+        #expect(try file.crc32(ofFirst: 150_000) == CRC.crc32(data.prefix(150_000)))
+        #expect(try file.crc32(ofFirst: data.count) == CRC.crc32(data))
+        #expect(throws: ZmodemError.self) { try SendFile(src.appendingPathComponent("missing")) }
+    }
 }

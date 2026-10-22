@@ -380,19 +380,14 @@ final class ZmodemSender {
     }
 
     private func sendFile(_ url: URL, filesLeft: Int, bytesLeft: Int) throws -> FileOutcome {
-        let data: Data
-        do {
-            data = try Data(contentsOf: url, options: .alwaysMapped)
-        } catch {
-            throw ZmodemError.fileError("Cannot read \(url.lastPathComponent): \(error.localizedDescription)")
-        }
+        let file = try SendFile(url)
         let name = url.lastPathComponent
         let mtime = Int((try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate?.timeIntervalSince1970 ?? 0)
         // name NUL "size mtime(octal) mode(octal) serial filesleft bytesleft" NUL
-        let fields = "\(data.count) \(String(mtime, radix: 8)) 100644 0 \(filesLeft) \(data.count + bytesLeft)"
+        let fields = "\(file.count) \(String(mtime, radix: 8)) 100644 0 \(filesLeft) \(file.count + bytesLeft)"
         let info = Array(name.utf8) + [0] + Array(fields.utf8) + [0]
 
-        link.log("Sending \(name) (\(data.count) bytes)")
+        link.log("Sending \(name) (\(file.count) bytes)")
         link.status("Offering \(name)")
 
         // Offer the file until the receiver says where to start (or to skip it). Each offer waits
@@ -429,8 +424,8 @@ final class ZmodemSender {
                     // Receiver wants a CRC of the file (or its first N bytes) to decide about resuming.
                     crcReplies += 1
                     if crcReplies > 10 { throw ZmodemError.tooManyErrors("receiver kept asking for the CRC of \(name)") }
-                    let n = h.position == 0 ? data.count : min(h.position, data.count)
-                    link.sendHex(ZHeader(.crc, position: Int(CRC.crc32(data.prefix(n)))))
+                    let n = h.position == 0 ? file.count : min(h.position, file.count)
+                    link.sendHex(ZHeader(.crc, position: Int(try file.crc32(ofFirst: n))))
                     deadline = Uptime.now + timeout
                 case .rinit:
                     // A stray ZRINIT (a repeat from before our offer): give the real reply a moment.
@@ -446,7 +441,7 @@ final class ZmodemSender {
             }
         }
 
-        var pos = min(start ?? 0, data.count)
+        var pos = min(start ?? 0, file.count)
         if pos > 0 { link.log("Receiver asked to start \(name) at \(pos)") }
         link.startFile(at: pos)
         // Rewinds since the receiver last confirmed new data: one stuck at a position fails the
@@ -455,7 +450,7 @@ final class ZmodemSender {
         // file. lrzsz likewise counts only repeats at the same position.
         var errors = 0
         var rewinds = 0
-        let maxRewinds = 30 + data.count / 1024
+        let maxRewinds = 30 + file.count / 1024
         var lastRewind: (position: Int, time: TimeInterval)?
         /// A ZRPOS taken for a duplicate since the last rewind; see the ZEOF wait.
         var ignoredPosition: Int?
@@ -484,14 +479,14 @@ final class ZmodemSender {
 
         /// The receiver reports having everything before `p`.
         func confirm(_ p: Int) {
-            guard p <= data.count, p > confirmed else { return }
+            guard p <= file.count, p > confirmed else { return }
             confirmed = p
             prods = 0
             errors = 0
         }
 
         func rewind(to p: Int, _ why: String) throws {
-            guard p >= 0 && p <= data.count else { throw ZmodemError.protocolError("Receiver asked for invalid position \(p)") }
+            guard p >= 0 && p <= file.count else { throw ZmodemError.protocolError("Receiver asked for invalid position \(p)") }
             link.discardUnsent()
             lastRewind = (p, Uptime.now)
             ignoredPosition = nil
@@ -513,9 +508,9 @@ final class ZmodemSender {
         func finished() -> FileOutcome {
             link.discardUnsent()
             link.fileFinished()
-            link.progress("Sent", name, data.count, data.count, force: true)
+            link.progress("Sent", name, file.count, file.count, force: true)
             link.log("Sent \(name)")
-            return .sent(data.count)
+            return .sent(file.count)
         }
 
         stream: while true {
@@ -528,10 +523,10 @@ final class ZmodemSender {
 
             while true {
                 try checkCancelled()
-                var n = min(blockSize, data.count - pos)
+                var n = min(blockSize, file.count - pos)
                 // Never more between acknowledgements than the window (the receiver's buffer).
                 if window > 0 { n = min(n, window - sinceAck) }
-                let last = pos + n >= data.count
+                let last = pos + n >= file.count
                 let end: UInt8
                 if last {
                     end = Z.crcE
@@ -543,13 +538,12 @@ final class ZmodemSender {
                 } else {
                     end = Z.crcG
                 }
-                link.sendSubpacket(data[data.startIndex + pos ..< data.startIndex + pos + n], end: end,
-                                   crc32: useCRC32, payload: true)
+                link.sendSubpacket(try file.bytes(pos..<pos + n), end: end, crc32: useCRC32, payload: true)
                 pos += n
                 sinceAck += n
                 sinceDrain += n
                 sinceConfirm += n
-                link.progress("Sending", name, pos, data.count)
+                link.progress("Sending", name, pos, file.count)
 
                 // Keep the port busy, with a bounded queue so a ZRPOS takes effect quickly.
                 if sinceDrain >= ZLink.batchSize {
@@ -636,7 +630,7 @@ final class ZmodemSender {
             eof: while true {
                 eofTries += 1
                 if eofTries > 10 { throw ZmodemError.tooManyErrors("no reply to ZEOF") }
-                link.sendBinary(ZHeader(.eof, position: data.count), crc32: useCRC32)
+                link.sendBinary(ZHeader(.eof, position: file.count), crc32: useCRC32)
                 eofSent = true
                 // Time the receiver's silence from when the data has left, not from when it was
                 // queued: at low baud rates the queue alone can take longer than the timeout.
@@ -720,5 +714,74 @@ final class ZmodemSender {
             noise.append(b)
         }
         return nil
+    }
+}
+
+/// A file being sent, read as it goes rather than mapped: touching a mapped file whose volume has
+/// gone (a USB stick pulled, a share dropped) kills the app with SIGBUS, where a read just fails.
+/// Its size is fixed when it's opened; a file that gets shorter meanwhile fails the send.
+final class SendFile {
+    let count: Int
+    private let name: String
+    private let fd: Int32
+    /// Recently read bytes, starting at file offset `cacheStart`: data goes out in order, and a
+    /// rewind usually goes back less than this.
+    private var cache = Data()
+    private var cacheStart = 0
+    static let cacheSize = 64 * 1024
+
+    init(_ url: URL) throws {
+        name = url.lastPathComponent
+        fd = open(url.path, O_RDONLY | O_CLOEXEC)
+        guard fd >= 0 else { throw ZmodemError.fileError("Cannot read \(name): \(String(cString: strerror(errno)))") }
+        var st = stat()
+        guard fstat(fd, &st) == 0 else {
+            let e = errno
+            close(fd)
+            throw ZmodemError.fileError("Cannot read \(name): \(String(cString: strerror(e)))")
+        }
+        count = Int(st.st_size)
+    }
+
+    deinit {
+        close(fd)
+    }
+
+    /// The bytes at file offsets `range`, which must lie within `count`.
+    func bytes(_ range: Range<Int>) throws -> Data {
+        if range.lowerBound < cacheStart || range.upperBound > cacheStart + cache.count {
+            cache = try read(at: range.lowerBound, max(Self.cacheSize, range.count))
+            cacheStart = range.lowerBound
+        }
+        return cache[(range.lowerBound - cacheStart)..<(range.upperBound - cacheStart)]
+    }
+
+    /// CRC-32 of the first `n` bytes, for a receiver deciding whether to resume.
+    func crc32(ofFirst n: Int) throws -> UInt32 {
+        var crc: UInt32 = 0xFFFF_FFFF
+        var pos = 0
+        while pos < n {
+            let end = min(n, pos + Self.cacheSize)
+            crc = CRC.crc32Update(try bytes(pos..<end), crc)
+            pos = end
+        }
+        return ~crc
+    }
+
+    private func read(at offset: Int, _ wanted: Int) throws -> Data {
+        let n = min(wanted, count - offset)
+        var buffer = Data(count: n)
+        var got = 0
+        while got < n {
+            let r = buffer.withUnsafeMutableBytes { pread(fd, $0.baseAddress! + got, n - got, off_t(offset + got)) }
+            if r > 0 {
+                got += r
+            } else if r == 0 {
+                throw ZmodemError.fileError("\(name) changed while being sent (it is shorter now)")
+            } else if errno != EINTR {
+                throw ZmodemError.fileError("Cannot read \(name): \(String(cString: strerror(errno)))")
+            }
+        }
+        return buffer
     }
 }
