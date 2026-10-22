@@ -24,7 +24,8 @@ struct XmodemCodecTests {
         #expect(b.count == 132)
         #expect(Array(b[0..<5]) == [X.soh, 1, 0xFE, 0x41, 0x42])
         #expect(b[5..<131].allSatisfy { $0 == X.eofPad })
-        #expect(b[131] == UInt8((0x41 + 0x42 + 126 * 0x1A) & 0xFF))
+        let sum: Int = 0x41 + 0x42 + 126 * 0x1A
+        #expect(b[131] == UInt8(sum & 0xFF))
     }
 
     @Test func crcBlock() {
@@ -509,7 +510,11 @@ struct XmodemScriptedTests {
 
     /// Data from the sender with no 0x01, 0x02, 0x04 or CAN in it, to place those by hand.
     private func plain(_ n: Int) -> [UInt8] {
-        (0..<n).map { i in [0x01, 0x02, 0x04, 0x18].contains(UInt8(truncatingIfNeeded: i)) ? 0x55 : UInt8(truncatingIfNeeded: i) }
+        let special: Set<UInt8> = [0x01, 0x02, 0x04, 0x18]
+        return (0..<n).map { i -> UInt8 in
+            let b = UInt8(truncatingIfNeeded: i)
+            return special.contains(b) ? 0x55 : b
+        }
     }
 
     /// A block whose start byte was lost (a dropped USB packet) is read from its number on. A
