@@ -459,9 +459,11 @@ public final class Session: @unchecked Sendable {
         switch match.trigger {
         case .remoteSending:
             do {
-                // Hand over the opening frame (when it all arrived in this read) so the trace shows it.
-                let opening = data.count > match.headerStart && data[data.startIndex + match.headerStart] == Z.pad
-                    ? data.suffix(from: data.startIndex + match.headerStart) : nil
+                // Hand over the opening frame so the trace shows it. When it began in an earlier
+                // read, those bytes were shown already; rebuild them, as they can only be the prefix.
+                let opening = match.carried > 0
+                    ? Data(ZmodemDetector.prefix.prefix(match.carried)) + data
+                    : data.suffix(from: data.startIndex + match.headerStart)
                 try startTransfer(.zmodemReceive, primed: opening, startRemote: false, automatic: true)
             } catch {
                 logger?.note("Auto ZMODEM receive failed: \(error)")

@@ -23,9 +23,11 @@ public struct ZmodemDetector: Sendable {
         public var headerStart: Int
         /// Offset just past the matched header bytes.
         public var headerEnd: Int
+        /// How many of the header's bytes arrived in earlier chunks (the start of `prefix`).
+        public var carried = 0
     }
 
-    private static let prefix: [UInt8] = [0x2A, 0x2A, 0x18, 0x42, 0x30] // "**", ZDLE, "B0"
+    static let prefix: [UInt8] = [0x2A, 0x2A, 0x18, 0x42, 0x30] // "**", ZDLE, "B0"
     private var matched = 0
 
     public init() {}
@@ -40,10 +42,10 @@ public struct ZmodemDetector: Sendable {
         for (i, byte) in data.enumerated() {
             if matched == prefix.count {
                 matched = 0
-                let start = max(0, i - prefix.count)
+                let start = max(0, i - prefix.count), carried = max(0, prefix.count - i)
                 switch byte {
-                case 0x30: return Match(trigger: .remoteSending, headerStart: start, headerEnd: i + 1)
-                case 0x31: return Match(trigger: .remoteReceiving, headerStart: start, headerEnd: i + 1)
+                case 0x30: return Match(trigger: .remoteSending, headerStart: start, headerEnd: i + 1, carried: carried)
+                case 0x31: return Match(trigger: .remoteReceiving, headerStart: start, headerEnd: i + 1, carried: carried)
                 default: break
                 }
             }
