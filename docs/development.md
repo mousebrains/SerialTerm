@@ -5,7 +5,7 @@
 - macOS 15 or later
 - Xcode 26 or later, or only the Command Line Tools 26 or later (`xcode-select --install`): the
   Swift 6.2 toolchain, required by SwiftTerm; the package uses Swift 5 language mode
-- `brew install lrzsz` (for the interop tests and for XMODEM/YMODEM)
+- `brew install lrzsz`, which plays the remote device in the interop tests (the app doesn't need it)
 
 `swift build` and `swift test` use whichever `xcode-select -p` points at, unless `DEVELOPER_DIR`
 is set. `scripts/make-app.sh` uses Xcode when it's installed.
@@ -39,14 +39,15 @@ swift test -c release --filter ZmodemPerformanceTests         # throughput (rele
 | `ZmodemDetectorTests` | Auto-start detection, including split and malformed headers |
 | `SessionLoggerTests` | Log line format and escaping |
 | `SerialPortPtyTests` | Real `SerialPort` I/O over a pseudo-terminal pair; binary transparency |
-| `CoreRobustnessTests` (several suites) | Log and trace files (name collisions, write failures, escaping), paced-typing cancel and echo matching, refused baud rates, discards and cancellable waits, lrzsz back-pressure and names, failed starts, closing mid-transfer, the automatic-start back-off |
+| `CoreRobustnessTests` (several suites) | Log and trace files (name collisions, write failures, escaping), paced-typing cancel and echo matching, refused baud rates, discards and cancellable waits, transfers that can't start, closing mid-transfer, the automatic-start back-off |
 | `ZmodemSenderRobustnessTests` | The sender against scripted receivers and a rate-limited line (`SlowLine`, `FakeReceiver`): noise, cancel, lost replies, receivers that go quiet, go away or advertise a buffer |
 | `ZmodemReceiverRobustnessTests`, `ZmodemSessionLeftoverTests` | The receiver against broken and hostile senders; false automatic starts; the prompt after a transfer |
 | `SerialTermTests` (app target) | Port matching, preference decoding and clamping, preset names, baud parsing, the terminal mode reset, the port scanner's cleanup, the window-close hook |
 | `ZmodemCodecTests` | CRC check values, header and subpacket round trips, escaping, file-name safety |
 | `ZmodemNativeTransferTests` | Native ↔ native: multi-file, block-boundary sizes, corrupted and dropped data, a corrupted back channel, cancel, timeouts, no overwriting |
 | `ZmodemDiagnosticsTests` | Trace contents at each level; error snapshots; workaround options on the wire |
-| `ZmodemEndToEndTests` | Native and lrzsz engines against lrzsz over a pty, both directions; noisy line; each workaround (skipped if lrzsz is missing) |
+| `ZmodemEndToEndTests` | ZMODEM, YMODEM and XMODEM against lrzsz over a pty, both directions; noisy line; each ZMODEM workaround; XMODEM checksum and CRC, 128 and 1K blocks (skipped if lrzsz is missing) |
+| `XmodemCodecTests`, `XmodemNativeTransferTests`, `XmodemScriptedTests` | Block and YMODEM header encoding; native ↔ native at every block-boundary size, checksum mode, noise both ways, cancel from either end, no overwriting; scripted peers for the handshake (an echoed 'C'), EOT, out-of-step blocks, leftovers |
 | `ZmodemPerformanceTests` | Encoder and end-to-end throughput floors (skipped in debug builds) |
 | `HardwareProbeTests`, `HardwareSendTests`, `HardwareReceiveTests`, `HardwareRawThroughputTests`, `HardwareXmodemTests` | Real devices; skipped unless enabled (below) |
 
@@ -56,7 +57,7 @@ its own tty.
 
 ### Testing against real hardware
 
-These tests talk to a device with a shell and lrzsz. SerialTerm must not have the port open
+These tests talk to a device with a shell and lrzsz (`sz`/`rz`, `sx`/`rx`, `sb`/`rb`). SerialTerm must not have the port open
 (disconnect it first). Run them in release mode for realistic speeds:
 
 ```sh
@@ -80,7 +81,7 @@ SERIALTERM_PROBE_TRACE_DIR=/tmp/traces \
 SERIALTERM_PROBE_PORT=$PORT SERIALTERM_PROBE_RAW=1 \
   swift test -c release --filter HardwareRawThroughputTests
 
-# XMODEM/YMODEM in all four directions via the device's lrzsz, MD5-checked over the line
+# Built-in XMODEM/YMODEM in all four directions with the device's lrzsz, MD5-checked over the line
 SERIALTERM_PROBE_PORT=$PORT SERIALTERM_PROBE_XMODEM=1 swift test --filter HardwareXmodemTests
 ```
 
@@ -120,5 +121,5 @@ package updates.
   they are macros whose compiler plugin ships only with Xcode, so they break builds with the
   Command Line Tools. Keep view state in an `ObservableObject` held by `@StateObject`. CI checks.
 - New behavior comes with tests. Transfer changes should be checked against lrzsz, not only
-  against the native implementation.
+  against SerialTerm's own other end.
 - Comments explain *why*, especially for protocol behavior.
