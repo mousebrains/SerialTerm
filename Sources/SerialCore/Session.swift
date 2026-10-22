@@ -178,6 +178,16 @@ public final class Session: @unchecked Sendable {
         port.close()
     }
 
+    /// `close` on a background queue, so the caller isn't held up while a running transfer stops
+    /// and the abort goes out (normally milliseconds; up to about 2 s with a stuck line). `done` is
+    /// called on that queue once the port is closed. The session stays alive until then.
+    public func closeInBackground(then done: (@Sendable () -> Void)? = nil) {
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            close()
+            done?()
+        }
+    }
+
     deinit {
         // Released without close() (or before the port's close handler ran): don't leave a
         // transfer running with nobody to finish it.

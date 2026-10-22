@@ -306,6 +306,28 @@ struct SessionLifecycleTests {
         #expect(released == nil)
     }
 
+    /// Closing waited on the caller's thread (the main thread, from the window) for the transfer
+    /// to stop and the abort to go out; in the background, the caller goes on at once.
+    @Test func closeInBackgroundStillAbortsTheRemote() throws {
+        let pty = try PtyPair()
+        let dir = try tempDir()
+        let file = dir.appendingPathComponent("f.bin")
+        try Data(repeating: 1, count: 100_000).write(to: file)
+        let session = Session(port: SerialPort(path: pty.slavePath, config: SerialConfig()), downloadDirectory: dir)
+        try session.open()
+        try session.startTransfer(.zmodemSend([file]))  // nobody answers; the sender waits for ZRINIT
+        #expect(pty.readFromPort(timeout: 1).count > 0)
+        let closed = Inbox<Bool>()
+        let start = Date()
+        session.closeInBackground { closed.add(session.port.isOpen) }
+        #expect(Date().timeIntervalSince(start) < 0.05)
+        #expect(closed.wait(timeout: 5) { !$0.isEmpty })
+        #expect(closed.all == [false], "port closed before `done`")
+        #expect(!session.isTransferring)
+        let abort = Data(repeating: 0x18, count: 8) + Data(repeating: 0x08, count: 8)
+        #expect(pty.readFromPort(timeout: 1).range(of: abort) != nil, "abort sent before the port closed")
+    }
+
     /// A remote that keeps starting a transfer and aborting it used to restart a failing receive
     /// many times a second, with a beep each time.
     @Test func repeatedAutomaticFailuresPause() throws {
