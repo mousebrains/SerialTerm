@@ -40,6 +40,8 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
 - Tests: codec, native↔native over corrupting links, interop with lrzsz over ptys (clean and
   noisy), traces, performance, and opt-in tests against real hardware.
 - CI on GitHub Actions; tagged releases.
+- Homebrew: `brew install --HEAD mousebrains/tap/serialterm` builds the app from source, so
+  macOS doesn't block it ([mousebrains/homebrew-tap](https://github.com/mousebrains/homebrew-tap)).
 
 - XMODEM-1K option (Settings ▸ Transfers): 1024-byte blocks, ~1.5× faster to the MicroRider.
 - Licensed GPL-3.0-or-later.
