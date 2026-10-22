@@ -207,8 +207,7 @@ final class TerminalModel: ObservableObject {
         guard let session else { return }
         let url = prefs.logDirectory.appendingPathComponent(SessionLogger.defaultFileName())
         do {
-            try session.startLogging(to: url)
-            logURL = url
+            logURL = try session.startLogging(to: url)
         } catch {
             statusMessage = "Cannot open log: \(error.localizedDescription)"
         }
@@ -343,6 +342,11 @@ final class TerminalModel: ObservableObject {
         case let .pacedTyping(remaining, echoMissing):
             pacedRemaining = remaining
             pacedEchoMissing = echoMissing
+        case let .logFailed(message):
+            logURL = nil
+            statusMessage = "Session log stopped: \(message)"
+        case let .notice(message):
+            statusMessage = message
         case let .disconnected(error):
             guard session != nil else { return }
             disconnect()

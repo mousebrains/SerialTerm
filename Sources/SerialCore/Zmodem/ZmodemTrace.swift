@@ -62,9 +62,13 @@ public final class ZmodemTrace: @unchecked Sendable {
         case note = "--"
     }
 
+    /// The trace file. If the requested name was taken, this is the "-2", "-3"… variant used instead.
     public let url: URL
     public let level: ZmodemOptions.TraceLevel
-    private let handle: FileHandle
+    /// Called once, on the trace's queue, if a write fails (disk full, volume gone). The trace
+    /// stops there.
+    var onFailure: ((Error) -> Void)?
+    let file: LogFile  // internal for tests
     private let queue = DispatchQueue(label: "ZmodemTrace")
     private let start = Date()
     private let formatter: DateFormatter
@@ -77,24 +81,20 @@ public final class ZmodemTrace: @unchecked Sendable {
     var rposIn = 0, rposOut = 0
     var dataBytesIn = 0, dataBytesOut = 0
     var subpacketsIn = 0, subpacketsOut = 0
-    var rawBytesIn = 0, rawBytesOut = 0
+    // Raw byte counts: received bytes are counted on the serial queue, so these are locked.
+    private let rawLock = NSLock()
+    private var rawIn = 0, rawOut = 0
+    var rawBytesIn: Int { rawLock.withLock { rawIn } }
+    var rawBytesOut: Int { rawLock.withLock { rawOut } }
 
+    /// Starts a new trace at `url`, or at a "-2", "-3"… variant if that name is taken.
     public init(url: URL, level: ZmodemOptions.TraceLevel) throws {
-        self.url = url
+        file = try LogFile(creatingNewFileAt: url)
+        self.url = file.url
         self.level = level
-        let fm = FileManager.default
-        try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        fm.createFile(atPath: url.path, contents: nil)
-        handle = try FileHandle(forWritingTo: url)
         formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "HH:mm:ss.SSS"
-    }
-
-    deinit {
-        // Every queued write holds a reference, so none is pending now. Don't sync onto
-        // `queue`: the last reference is often released by a write block running on it.
-        try? handle.close()
     }
 
     public static func defaultFileName(for date: Date = Date()) -> String {
@@ -110,7 +110,7 @@ public final class ZmodemTrace: @unchecked Sendable {
         let now = Date()
         queue.async { [self] in
             let stamp = String(format: "%@ +%.3f", formatter.string(from: now), now.timeIntervalSince(start))
-            handle.write(Data("\(stamp)  \(dir.rawValue) \(text)\n".utf8))
+            if let error = file.write(Data("\(stamp)  \(dir.rawValue) \(text)\n".utf8)) { onFailure?(error) }
         }
     }
 
@@ -124,7 +124,7 @@ public final class ZmodemTrace: @unchecked Sendable {
 
     /// Raw bytes as hex + ASCII, 32 per line. Verbose level only.
     func raw(_ dir: Direction, _ data: Data) {
-        if dir == .rx { rawBytesIn += data.count } else { rawBytesOut += data.count }
+        rawLock.withLock { if dir == .rx { rawIn += data.count } else { rawOut += data.count } }
         guard verbose, !data.isEmpty else { return }
         let bytes = [UInt8](data)
         var text = "raw \(bytes.count) bytes"
@@ -163,7 +163,7 @@ public final class ZmodemTrace: @unchecked Sendable {
                 errors: \(badHeaders) bad headers, \(badSubpackets) bad subpackets, \(garbageBytes) garbage bytes skipped, \
             \(timeouts) timeouts; ZRPOS \(rposIn) received / \(rposOut) sent
             """)
-        queue.sync { try? handle.synchronize() }
+        queue.sync { file.synchronize() }
     }
 }
 

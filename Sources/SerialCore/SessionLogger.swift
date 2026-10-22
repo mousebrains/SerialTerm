@@ -19,30 +19,23 @@ public final class SessionLogger: @unchecked Sendable {
         case note = "--"
     }
 
+    /// The log file. If the requested name was taken, this is the "-2", "-3"… variant used instead.
     public let url: URL
-    private let handle: FileHandle
+    /// Called once, on the logger's queue, if a write fails (disk full, volume gone). The log
+    /// stops there; set this before logging anything.
+    public var onFailure: ((Error) -> Void)?
+    let file: LogFile  // internal for tests
     private let queue = DispatchQueue(label: "SessionLogger")
     private let formatter: DateFormatter
 
+    /// Starts a new log at `url`, or at "name-2.log" (and so on) if that name is taken, so two
+    /// sessions never write into one file.
     public init(url: URL) throws {
-        self.url = url
-        let fm = FileManager.default
-        try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if !fm.fileExists(atPath: url.path) {
-            fm.createFile(atPath: url.path, contents: nil)
-        }
-        handle = try FileHandle(forWritingTo: url)
-        handle.seekToEndOfFile()
-
+        file = try LogFile(creatingNewFileAt: url)
+        self.url = file.url
         formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
-    }
-
-    deinit {
-        // Every queued write holds a reference, so none is pending now. Don't sync onto
-        // `queue`: the last reference is often released by a write block running on it.
-        try? handle.close()
     }
 
     /// A file name like `SerialTerm-2026-10-20-103201.log` for a new session.
@@ -58,18 +51,20 @@ public final class SessionLogger: @unchecked Sendable {
         write(direction, Self.escape(data), at: date)
     }
 
+    /// Notes may quote the remote (file names, lrzsz messages), so control and invisible
+    /// formatting characters are escaped: a note can't start a fake log line.
     public func note(_ text: String, at date: Date = Date()) {
-        write(.note, text, at: date)
+        write(.note, Self.escapeNote(text), at: date)
     }
 
     public func flush() {
-        queue.sync { try? handle.synchronize() }
+        queue.sync { file.synchronize() }
     }
 
     private func write(_ direction: Direction, _ text: String, at date: Date) {
         queue.async { [self] in
             let line = "\(formatter.string(from: date)) \(direction.rawValue) \(text)\n"
-            handle.write(Data(line.utf8))
+            if let error = file.write(Data(line.utf8)) { onFailure?(error) }
         }
     }
 
@@ -87,6 +82,30 @@ public final class SessionLogger: @unchecked Sendable {
             case 0x5C: out += "\\\\"
             case 0x20...0x7E: out.unicodeScalars.append(Unicode.Scalar(byte))
             default: out += String(format: "\\x%02X", byte)
+            }
+        }
+        return out
+    }
+
+    /// Text is kept, except line breaks, control characters and invisible formatting characters
+    /// (bidirectional overrides, zero-width characters), which are escaped.
+    public static func escapeNote(_ text: String) -> String {
+        var out = ""
+        out.reserveCapacity(text.utf8.count)
+        for s in text.unicodeScalars {
+            switch s.value {
+            case 0x0D: out += "\\r"
+            case 0x0A: out += "\\n"
+            case 0x09: out += "\\t"
+            case 0x1B: out += "\\e"
+            case 0x00..<0x20, 0x7F...0x9F: out += String(format: "\\x%02X", s.value)
+            default:
+                switch s.properties.generalCategory {
+                case .format, .lineSeparator, .paragraphSeparator:
+                    out += String(format: "\\u{%04X}", s.value)
+                default:
+                    out.unicodeScalars.append(s)
+                }
             }
         }
         return out

@@ -41,9 +41,15 @@ previous one, so it goes as fast as the device keeps up. A printable character m
 itself; Return as CR or LF; other control characters (Ctrl-C, Backspace) as anything. If no echo
 arrives within *Give up waiting after* (1 s by default), the character is sent anyway and the
 status bar shows **No echo**, so a device with echo off is slowed down but never stuck. The speed
-limit and line pause still apply, counted from each echo. While text is waiting, the status bar shows how much is left
-and a **Cancel** button; the status bar also shows the pace whenever it is on. Keys you type
-meanwhile, Ctrl-C included, queue behind the text, so use **Cancel** to stop a long paste.
+limit and line pause still apply, counted from each echo. The echo must arrive first, within
+the next few dozen bytes from the device; the same character further on in its output doesn't
+count. While text is waiting, the status bar shows how much is left and a **Cancel** button; the
+status bar also shows the pace whenever it is on. Keys you type meanwhile, Ctrl-C included, queue
+behind the text, so use **Cancel** to stop a long paste. Cancel also ends the wait for an echo,
+so the next key goes out at once.
+
+The commands SerialTerm types to start a transfer on the device (`rb` and `rx name`) go out at the
+same pace.
 
 **Several devices**: each window (**⌘N**) has its own port and line settings. New windows start
 with the settings used most recently.
@@ -134,7 +140,11 @@ Open with **SerialTerm ▸ Settings…** (⌘,). These settings apply to all win
 - *Save received files to* (default: Downloads) and *Choose files to send from* (the file picker's
   starting folder; it follows your last choice).
 - *Start transfers automatically*: ZMODEM when the remote runs `sz`/`rz`, and XMODEM when lrzsz's
-  `sx` announces itself. *Use lrzsz instead of the built-in ZMODEM*.
+  `sx` announces itself. If three automatic transfers fail within 30 seconds, automatic starts
+  pause for 30 seconds, so a device stuck starting and aborting transfers can't restart one
+  many times a second. *Use lrzsz instead of the built-in ZMODEM*; files it receives are saved
+  under the same safe names as the built-in receiver's (no paths, no leading dots, never
+  overwriting).
 - *ZMODEM diagnostics* and *ZMODEM workarounds*: see [ZMODEM & Diagnostics](zmodem.md).
 
 **Presets**: rename, reorder or delete [presets](#presets), and change or clear each one's port.
@@ -157,7 +167,9 @@ Open with **SerialTerm ▸ Settings…** (⌘,). These settings apply to all win
 ## Session logs
 
 When logging is on, each connection writes a new file such as `SerialTerm-2026-10-20-103201.log`
-in the log folder:
+in the log folder. If another window starts a log in the same second, its file gets `-2` (and so
+on) added to the name: each session has its own file, and an existing file is never
+overwritten.
 
 ```
 2026-10-20 10:32:01.120 -- Log opened; /dev/cu.usbserial-A50285BI 115200 8N1; time zone America/Los_Angeles
@@ -174,6 +186,10 @@ in the log folder:
   SerialTerm asks the driver for 1 ms, but not every driver honors that.
 - File transfer data is not logged, only each file's start and finish and any errors. For full
   protocol detail, see the ZMODEM trace.
+- Notes quote what the device sent, such as file names, with the same escapes, so nothing the
+  device sends can start a line of its own in the log.
+- If the log can't be written (the disk is full, or the log folder's volume was removed), logging
+  stops for that session and the status bar says so. SerialTerm keeps running.
 
 ## File transfers
 
@@ -196,6 +212,8 @@ files into the download folder.
 - Drop files onto the terminal window.
 
 **Progress** appears in the status bar. **Cancel** (status bar or Transfer menu) stops both ends.
+Disconnecting, or switching the window to another port, during a transfer cancels it and tells
+the device to stop first.
 **Results** appear in the status bar when the transfer ends, for example `Received 3 files
 (183 MB)`.
 
@@ -248,7 +266,13 @@ ignore the baud rate, so for those, check the device's own settings.
 
 **Nothing at all from the device.** Check the port (USB adapters are listed by name) and try
 pressing Return. Some devices need hardware flow control set to match, or none. If RTS/CTS is on
-and the device doesn't drive CTS, nothing can be sent.
+and the device doesn't drive CTS, nothing can be sent; a transfer then waits until you cancel it
+or disconnect.
+
+**The device resets when SerialTerm connects or disconnects.** Like most terminal programs,
+SerialTerm leaves DTR and RTS to the driver: they come on when the port opens and go off when it
+closes. Boards that reset on DTR (Arduino-style) reset then. The port keeps SerialTerm's settings
+after it closes; the next program to open it sets its own.
 
 **Errors at high speed.** Turn on RTS/CTS if both ends support it. For ZMODEM, see the workarounds
 in [ZMODEM & Diagnostics](zmodem.md).

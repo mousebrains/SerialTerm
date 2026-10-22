@@ -93,11 +93,19 @@ public final class ExternalTransfer: FileTransfer, @unchecked Sendable {
     private let stdoutPipe = Pipe()
     private let stderrPipe = Pipe()
     private let feedQueue = DispatchQueue(label: "ExternalTransfer.feed")
+    private let lock = NSLock()
     private var lastStatus = ""
     private var cancelled = false
+    /// Receives run in a private folder inside the download folder; on exit the files are moved
+    /// out under the same safe names the built-in receiver uses (lrzsz keeps names like ".profile").
+    private let incoming: URL?
+    private let destination: URL
 
     /// Directories searched for lrzsz before `PATH` (GUI apps get a minimal `PATH`).
     public static var toolSearchPaths = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]
+    /// How much of lrzsz's output may wait for the serial line. A tty would block the program
+    /// when its buffer filled; through a pipe nothing does unless we wait.
+    static let maxQueuedOutput = 64 * 1024
 
     /// - Parameter xmodem1K: send XMODEM with 1024-byte blocks (XMODEM-1K) instead of 128.
     public init(kind: TransferKind, workingDirectory: URL, xmodem1K: Bool = false) throws {
@@ -107,46 +115,94 @@ public final class ExternalTransfer: FileTransfer, @unchecked Sendable {
         if xmodem1K, case .xmodemSend = kind { args.insert("-k", at: 0) }
         guard let tool = Self.findTool(names) else { throw TransferError.toolNotFound(names) }
 
+        destination = directory ?? workingDirectory
+        switch kind {
+        case .zmodemReceive, .ymodemReceive:
+            let folder = workingDirectory.appendingPathComponent(".SerialTerm-incoming-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+            incoming = folder
+        default:
+            incoming = nil
+        }
+
         process.executableURL = tool
         process.arguments = args
-        process.currentDirectoryURL = directory ?? workingDirectory
+        process.currentDirectoryURL = incoming ?? destination
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
     }
 
+    deinit {
+        // Never started: don't leave the empty folder behind. rmdir only removes an empty one.
+        if let incoming { _ = rmdir(incoming.path) }
+    }
+
     public func start() throws {
         stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] h in
             let data = h.availableData
-            if !data.isEmpty { self?.onOutput?(data) }
+            guard let self, !data.isEmpty else { return }
+            self.onOutput?(data)
+            // Hold lrzsz back to what the line can take: otherwise a whole file queues up, its
+            // ZEOF timer runs out while the data is still going out, and a cancel waits behind it.
+            self.waitForOutput?(Self.maxQueuedOutput)
         }
         stderrPipe.fileHandleForReading.readabilityHandler = { [weak self] h in
             let data = h.availableData
-            guard let self, !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            // lrzsz redraws progress with \r; report the latest non-empty line.
-            let lines = text.split(whereSeparator: { $0 == "\r" || $0 == "\n" })
-            if let last = lines.last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) {
-                let line = String(last).trimmingCharacters(in: .whitespaces)
-                self.lastStatus = line
-                self.onStatus?(line)
-            }
+            guard let self, !data.isEmpty, let text = String(data: data, encoding: .utf8),
+                  let line = Self.latestStatusLine(text) else { return }
+            self.lock.withLock { self.lastStatus = line }
+            self.onStatus?(line)
         }
         process.terminationHandler = { [weak self] p in
             guard let self else { return }
             self.stdoutPipe.fileHandleForReading.readabilityHandler = nil
             self.stderrPipe.fileHandleForReading.readabilityHandler = nil
+            let moved = self.moveReceivedFiles()
             let ok = p.terminationReason == .exit && p.terminationStatus == 0
-            let message: String
-            if self.cancelled {
+            let (cancelled, lastStatus) = self.lock.withLock { (self.cancelled, self.lastStatus) }
+            var message: String
+            if cancelled {
                 message = "Cancelled"
             } else if ok {
                 message = "Complete"
             } else {
-                message = self.lastStatus.isEmpty ? "Failed (exit \(p.terminationStatus))" : self.lastStatus
+                message = lastStatus.isEmpty ? "Failed (exit \(p.terminationStatus))" : lastStatus
             }
-            self.onFinish?(ok && !self.cancelled, message)
+            if !moved.isEmpty { message += "; saved " + moved.joined(separator: ", ") }
+            self.onFinish?(ok && !cancelled, message)
         }
         try process.run()
+    }
+
+    /// Moves what lrzsz received into the download folder under safe, unused names.
+    /// Returns the names used where they differ from what the sender sent.
+    private func moveReceivedFiles() -> [String] {
+        guard let incoming else { return [] }
+        let fm = FileManager.default
+        var renamed: [String] = []
+        let names = (try? fm.contentsOfDirectory(atPath: incoming.path)) ?? []
+        for name in names.sorted() {
+            let source = incoming.appendingPathComponent(name)
+            let target = ZmodemReceiver.uniqueURL(in: destination, for: name)
+            do {
+                try fm.moveItem(at: source, to: target)
+                if target.lastPathComponent != name { renamed.append("\(name) as \(target.lastPathComponent)") }
+            } catch {
+                onLog?("Could not move \(name) into \(destination.path): \(error.localizedDescription); it is in \(incoming.path)")
+            }
+        }
+        if (try? fm.contentsOfDirectory(atPath: incoming.path))?.isEmpty ?? false {
+            try? fm.removeItem(at: incoming)
+        }
+        return renamed
+    }
+
+    /// The last non-blank line of lrzsz's stderr output; it redraws its progress with CR.
+    static func latestStatusLine(_ text: String) -> String? {
+        text.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .last { !$0.isEmpty }
     }
 
     /// Bytes received from the serial line, forwarded to the program.
@@ -163,9 +219,16 @@ public final class ExternalTransfer: FileTransfer, @unchecked Sendable {
     public static let abortSequence = Data(repeating: 0x18, count: 8) + Data(repeating: 0x08, count: 8)
 
     public func cancel() {
-        cancelled = true
+        lock.withLock { cancelled = true }
+        // Drop what's queued, so the abort goes out now rather than after the rest of the file.
+        discardOutput?()
         onOutput?(Self.abortSequence)
-        if process.isRunning { process.terminate() }
+        guard process.isRunning else { return }
+        process.terminate()
+        let process = self.process
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+        }
     }
 
     // MARK: - Command lines
@@ -187,7 +250,8 @@ public final class ExternalTransfer: FileTransfer, @unchecked Sendable {
         case let .xmodemReceive(url):
             // lrzsz refuses receive paths containing "/" ("Security Violation"), so run in the
             // file's folder with a bare name. -y: the save panel already confirmed any overwrite.
-            return (["lrx", "rx"], ["-b", "-y", "-vv", url.lastPathComponent], url.deletingLastPathComponent())
+            return (["lrx", "rx"], ["-b", "-y", "-vv"] + endOfOptions(url.lastPathComponent),
+                    url.deletingLastPathComponent())
         case let .xmodemSend(url):
             return (["lsx", "sx"], ["-b", "-vv", url.path], nil)
         }
@@ -198,9 +262,15 @@ public final class ExternalTransfer: FileTransfer, @unchecked Sendable {
     public static func remoteReceiveCommand(for kind: TransferKind) -> String? {
         switch kind {
         case .ymodemSend: return "rb\r"
-        case let .xmodemSend(url): return "rx \(shellQuoted(url.lastPathComponent))\r"
+        case let .xmodemSend(url):
+            return "rx " + endOfOptions(url.lastPathComponent).map(shellQuoted).joined(separator: " ") + "\r"
         default: return nil
         }
+    }
+
+    /// A name for lrzsz's command line: after "--" if it starts with "-", so it isn't read as options.
+    static func endOfOptions(_ name: String) -> [String] {
+        name.hasPrefix("-") ? ["--", name] : [name]
     }
 
     static func shellQuoted(_ s: String) -> String {

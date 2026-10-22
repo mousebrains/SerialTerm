@@ -19,6 +19,8 @@ Sources/SerialCore/
   SerialPort.swift         open/configure (termios + IOSSIOSPEED), reads via DispatchSource, write queue
   Session.swift            one connection: routes input to display / log / transfer; ZMODEM auto-start
   SessionLogger.swift      millisecond-timestamped session log
+  LogFile.swift            append-only file for logs and traces: never replaces a file, never raises
+  PacedSender.swift        paced typing (characters per second, line pause, wait for echo)
   ZmodemDetector.swift     finds ZRQINIT/ZRINIT in the incoming stream (split-safe)
   FileTransfer.swift       FileTransfer protocol; TransferKind; ExternalTransfer (lrzsz)
   Zmodem/
@@ -69,7 +71,13 @@ Sources/SerialTerm/
 | `SerialPort.write` | Writes in order; waits on `poll(POLLOUT)` when the driver is full |
 | `ZMODEM` (one `Thread` per transfer) | Runs the sender or receiver as blocking, sequential code |
 | `SessionLogger`, `ZmodemTrace` | Serial queues for file writes |
-| lrzsz pipes | `FileHandle` readability handlers (lrzsz transfers only) |
+| `PacedSender` | Serial queue that times typed text (and the receive commands typed for transfers) |
+| lrzsz pipes | `FileHandle` readability handlers (lrzsz transfers only); the stdout handler blocks while the port's backlog is full |
+
+`Session`'s settings (download folder, ZMODEM options, …) are written on the main thread and
+read on the read queue when a transfer starts automatically, so they are kept under its lock.
+`SerialPort` uses its descriptor only while holding its lock and gives it up under the same lock,
+so a call can't reach a descriptor number that was closed and reused by another open.
 
 **Display batching**: at 2–3 Mbaud, input arrives in thousands of small reads per second.
 `DisplayBuffer` collects them and schedules at most one main-thread update at a time, so the
@@ -82,7 +90,14 @@ a history used for error snapshots. Cancelling wakes the reader, which then thro
 
 **Back-pressure**: senders call `waitForOutput(maxPending:)`. `SerialPort` counts bytes queued but
 not yet accepted by the driver, so a sender can keep the driver busy (a 64 KB backlog) without
-queuing an unbounded amount, and a `ZRPOS` rewind wastes little.
+queuing an unbounded amount, and a `ZRPOS` rewind wastes little. The lrzsz runner waits the same
+way after passing on each chunk of the program's output, which blocks the program as a tty would.
+The wait gives up when the transfer is cancelled, so flow control holding the line can't block a
+cancel. `discardPendingWrites` drops queued writes, stops the one in progress, and flushes the
+driver (`TCOFLUSH`).
+
+**Closing**: `Session.close()` cancels a running transfer, sends the abort sequence and waits up
+to a second for it to go out before closing the port, so neither end carries on alone.
 
 ## Session routing
 
@@ -97,6 +112,11 @@ queuing an unbounded amount, and a `ZRPOS` rewind wastes little.
    - nothing → display.
 
 User input (`sendFromUser`) is dropped while a transfer runs.
+
+`startTransfer` claims the transfer slot before creating anything, so a refused start
+(`TransferInProgress`) leaves no trace file behind. Once it has sent `transferStarted`, it
+always follows with `transferFinished`, also when the transfer then fails to start. Automatic
+starts that fail three times within 30 s pause automatic starts for 30 s.
 
 ## File transfers
 
@@ -116,7 +136,9 @@ public protocol FileTransfer: AnyObject, Sendable {
 - `ZmodemTransfer`: the native implementation (see [ZMODEM](zmodem.md)).
 - `ExternalTransfer`: runs `lrz`/`lsz`/`lrb`/`lsb`/`lrx`/`lsx` with their standard input and
   output piped to the serial line. It searches `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`,
-  then `PATH`.
+  then `PATH`. Receives run in a private folder inside the download folder; when the program
+  exits, the files are moved out under the native receiver's safe names. Cancel sends SIGTERM,
+  then SIGKILL after 2 s.
 
 ## Port discovery
 
