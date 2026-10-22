@@ -12,6 +12,14 @@ private func tempDir() throws -> URL {
     return url
 }
 
+/// CPU time used so far by the calling thread. Unlike the wall clock it doesn't count time the
+/// thread spends waiting for a core, which on a busy CI runner can be more than 0.1 s.
+private func threadCPUTime() -> TimeInterval {
+    var t = timespec()
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t)
+    return TimeInterval(t.tv_sec) + TimeInterval(t.tv_nsec) / 1e9
+}
+
 /// Makes `fd` fail every write, the way a full disk or a vanished volume would.
 private func breakWrites(to fd: Int32) {
     let readOnly = open("/dev/null", O_RDONLY)
@@ -71,13 +79,16 @@ struct LogFileTests {
     }
 
     /// Escaping used to run on the caller's queue (the serial read queue) and take ~22 ms per
-    /// 64 KB of binary data in release builds, holding up reads of a fast line.
+    /// 64 KB of binary data in release builds, holding up reads of a fast line. This measures the
+    /// caller's CPU time, not the wall clock: on a busy runner a wall-clock limit failed with the
+    /// escaping already off the caller.
     @Test func loggingLeavesTheEscapingToTheLogger() throws {
         let logger = try SessionLogger(url: try tempDir().appendingPathComponent("t.log"))
         let chunk = Data((0..<1_000_000).map { UInt8(truncatingIfNeeded: $0 &* 7) })
-        let start = Date()
+        let start = threadCPUTime()
         logger.log(.rx, chunk)
-        #expect(Date().timeIntervalSince(start) < 0.05)
+        let used = threadCPUTime() - start
+        #expect(used < 0.05, "the caller used \(used) s of CPU")
         logger.flush()
         let line = try String(contentsOf: logger.url, encoding: .utf8)
         #expect(line.hasSuffix(" RX " + SessionLogger.escape(chunk) + "\n"))
