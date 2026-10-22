@@ -32,13 +32,13 @@ struct SerialPortInfo: Identifiable, Hashable {
     }
 
     /// The port in `ports` that is the one remembered as `path`, `serialNumber` and `interface`.
-    /// The same name with the same (or no recorded) serial number comes first: the device hasn't
-    /// moved. Otherwise the serial number is followed to a new name, but only when that is
-    /// unambiguous, since every port of a multi-port adapter has the same one.
+    /// The same name with the same serial number, or none on both, comes first: the device hasn't
+    /// moved. (A device with a serial number at the name of one without is another device: names
+    /// can follow the USB socket.) Otherwise the serial number is followed to a new name, but only
+    /// when that is unambiguous, since every port of a multi-port adapter has the same one.
     static func find(path: String?, serialNumber: String?, interface: Int?, in ports: [SerialPortInfo]) -> SerialPortInfo? {
         let serialNumber = serialNumber.nonEmpty
-        if let path, let p = ports.first(where: { $0.path == path }),
-           serialNumber == nil || p.usbSerialNumber == serialNumber {
+        if let path, let p = ports.first(where: { $0.path == path }), p.usbSerialNumber.nonEmpty == serialNumber {
             return p
         }
         guard let serialNumber else { return nil }

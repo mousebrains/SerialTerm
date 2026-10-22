@@ -47,6 +47,20 @@ struct PortMatchingTests {
         #expect(SerialPortInfo.find(path: "/dev/cu.wchusbserial1411", serialNumber: "", interface: nil, in: ports) == nil)
     }
 
+    /// A device without a serial number was matched by name alone, so another device that has one,
+    /// plugged into the same socket (CDC devices are named after the USB location), was taken for
+    /// it and auto-reconnected to.
+    @Test func aDeviceWithASerialNumberIsNotTakenForOneWithout() {
+        let other = [usb("cu.usbmodem14101", sn: "A50285BI")]
+        #expect(SerialPortInfo.find(path: "/dev/cu.usbmodem14101", serialNumber: nil, interface: nil, in: other) == nil)
+        // An empty serial number counts as none, on either side.
+        let blank = [usb("cu.usbmodem14101", sn: "")]
+        #expect(SerialPortInfo.find(path: "/dev/cu.usbmodem14101", serialNumber: nil, interface: nil, in: blank)?.path
+            == "/dev/cu.usbmodem14101")
+        #expect(SerialPortInfo.find(path: "/dev/cu.usbmodem14101", serialNumber: "", interface: nil, in: blank)?.path
+            == "/dev/cu.usbmodem14101")
+    }
+
     /// Choosing a port without a serial number used to keep the previous port's, so auto-reconnect
     /// looked for (and could switch to) the other adapter.
     @Test func choosingAPortReplacesTheRememberedSerialNumber() {
