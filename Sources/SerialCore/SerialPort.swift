@@ -190,12 +190,12 @@ public final class SerialPort: @unchecked Sendable {
     /// Returns whether the backlog got down to `maxPending`.
     @discardableResult
     public func waitForPendingWrites(maxPending: Int, timeout: TimeInterval? = nil, until stop: (() -> Bool)? = nil) -> Bool {
-        let deadline = timeout.map { Date().addingTimeInterval($0) }
+        let deadline = timeout.map { Uptime.now + $0 }
         pendingCondition.lock()
         defer { pendingCondition.unlock() }
         while pendingBytes > max(0, maxPending) {
             guard isOpen else { return false }
-            if let deadline, Date() >= deadline { return false }
+            if let deadline, Uptime.now >= deadline { return false }
             if let stop {
                 // Not under our lock: the check may take the caller's own locks.
                 pendingCondition.unlock()
@@ -203,9 +203,9 @@ public final class SerialPort: @unchecked Sendable {
                 pendingCondition.lock()
                 if stopped { return false }
             }
-            var wake = Date().addingTimeInterval(0.1)
-            if let deadline { wake = min(wake, deadline) }
-            _ = pendingCondition.wait(until: wake)
+            // A short wait from now, so a clock change can't stretch it.
+            let wait = deadline.map { min(0.1, max(0, $0 - Uptime.now)) } ?? 0.1
+            _ = pendingCondition.wait(until: Date(timeIntervalSinceNow: wait))
         }
         return true
     }

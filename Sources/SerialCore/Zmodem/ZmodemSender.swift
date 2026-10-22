@@ -19,8 +19,9 @@ final class ZLink {
     static let maxBacklog = 64 * 1024
     private let status: (String) -> Void
     private let logLine: (String) -> Void
-    private var lastProgress = Date.distantPast
-    private var rateStart = Date()
+    // Times here are `Uptime`, so a clock change can't distort the rate.
+    private var lastProgress = -TimeInterval.infinity
+    private var rateStart = Uptime.now
     private var rateBase = 0
 
     init(reader: ZReader, trace: ZmodemTrace?, output: @escaping (Data) -> Void, drain: @escaping (Int) -> Void,
@@ -122,28 +123,28 @@ final class ZLink {
     private var dataBytes = 0
     private var dataTime: TimeInterval = 0
     private var lastDone = 0
-    private var lastDataAt = Date()
+    private var lastDataAt = Uptime.now
     private var fileActive = false
-    private var lastFileEnd: Date?
+    private var lastFileEnd: TimeInterval?
     private var gaps: [TimeInterval] = []
 
     /// Called when a file's data starts.
     func startFile(at offset: Int) {
-        let now = Date()
-        if !fileActive, let end = lastFileEnd { gaps.append(now.timeIntervalSince(end)) }
+        let now = Uptime.now
+        if !fileActive, let end = lastFileEnd { gaps.append(now - end) }
         fileActive = true
         rateStart = now
         rateBase = offset
         lastDone = offset
         lastDataAt = now
-        lastProgress = .distantPast
+        lastProgress = -.infinity
     }
 
     /// Called when the sender goes back to `offset`. Resent data counts as data moved (it crossed
     /// the line), but the stall before the rewind doesn't count as time spent moving it.
     func rewound(to offset: Int) {
         lastDone = offset
-        lastDataAt = Date()
+        lastDataAt = Uptime.now
     }
 
     /// Data rate measured so far (bytes a second), once there's a second of it.
@@ -160,14 +161,14 @@ final class ZLink {
     /// Throttled progress line:
     /// "3/10, 37% of 2.8 MB, ~45 s left · Receiving name  45 KB / 100 KB (45%)  40 KB/s".
     func progress(_ verb: String, _ name: String, _ done: Int, _ total: Int?, force: Bool = false) {
-        let now = Date()
+        let now = Uptime.now
         if fileActive, done > lastDone {
             dataBytes += done - lastDone
-            dataTime += now.timeIntervalSince(lastDataAt)
+            dataTime += now - lastDataAt
             lastDone = done
             lastDataAt = now
         }
-        guard force || now.timeIntervalSince(lastProgress) >= 0.1 else { return }
+        guard force || now - lastProgress >= 0.1 else { return }
         lastProgress = now
         var line = "\(verb) \(name)  \(Self.size(done))"
         var batch: [String] = []
@@ -182,7 +183,7 @@ final class ZLink {
         if let total, total > 0 {
             line += " / \(Self.size(total)) (\(Int(min(100, max(0, Double(done) * 100 / Double(total)))))%)"
         }
-        let elapsed = now.timeIntervalSince(rateStart)
+        let elapsed = now - rateStart
         if elapsed > 0.2 {
             line += "  \(Self.size(Int(Double(done - rateBase) / elapsed)))/s"
         }
