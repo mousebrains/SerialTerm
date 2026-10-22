@@ -57,8 +57,8 @@ final class TerminalModel: ObservableObject {
     /// Transfers this window started (menus, drops, file prompts) whose `transferStarted`
     /// hasn't arrived yet. Anything else was started automatically by the remote.
     private var userStartsPending = 0
-    /// About the running transfer: started by the user, the trace it writes (built-in ZMODEM
-    /// with tracing on), and whether the user cancelled it.
+    /// About the running transfer: started by the user, the trace it writes (with tracing on),
+    /// and whether the user cancelled it.
     private var transferByUser = false
     private var transferTrace: URL?
     private var transferCancelled = false
@@ -145,7 +145,6 @@ final class TerminalModel: ObservableObject {
         let port = SerialPort(path: path, config: connection.config)
         let session = Session(port: port, downloadDirectory: prefs.downloadDirectory)
         session.autoZmodem = prefs.autoZmodem
-        session.useExternalZmodem = prefs.useLrzszForZmodem
         session.zmodemOptions = prefs.zmodem
         session.xmodem1K = prefs.xmodem1K
         session.traceDirectory = prefs.logDirectory
@@ -469,7 +468,7 @@ final class TerminalModel: ObservableObject {
             transferByUser = userStartsPending > 0
             userStartsPending = max(0, userStartsPending - 1)
             transferCancelled = false
-            // A new trace file means this is a built-in ZMODEM transfer that writes one.
+            // A new trace file means this transfer writes one.
             let trace = session?.lastTraceURL
             transferTrace = trace != nil && trace != lastTraceURL ? trace : nil
             if let trace { lastTraceURL = trace }
@@ -489,7 +488,7 @@ final class TerminalModel: ObservableObject {
             } else if cancelled {
                 statusMessage = "Transfer cancelled"
             } else {
-                statusMessage = "Transfer failed: \(message)" + (trace != nil ? " — see Transfer ▸ Open Last ZMODEM Trace" : "")
+                statusMessage = "Transfer failed: \(message)" + (trace != nil ? " — see Transfer ▸ Open Last Transfer Trace" : "")
                 // An automatic transfer is the remote's doing; beep only for one the user asked for.
                 if byUser { NSSound.beep() }
             }
@@ -638,7 +637,6 @@ final class TerminalModel: ObservableObject {
         objectWillChange.send()
         if let session {
             session.autoZmodem = new.autoZmodem
-            session.useExternalZmodem = new.useLrzszForZmodem
             session.zmodemOptions = new.zmodem
             session.xmodem1K = new.xmodem1K
             session.traceDirectory = new.logDirectory

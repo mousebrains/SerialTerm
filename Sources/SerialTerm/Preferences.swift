@@ -150,7 +150,6 @@ struct Preferences: Codable, Equatable {
     var presets: [ConnectionPreset] = []
 
     var autoZmodem = true
-    var useLrzszForZmodem = false
     var zmodem = ZmodemOptions()
     var xmodem1K = false
     var autoReconnect = true
@@ -179,7 +178,6 @@ struct Preferences: Codable, Equatable {
         let list = (try? c.decode([Lenient<ConnectionPreset>].self, forKey: .presets)) ?? []
         presets = Self.distinct(list.compactMap(\.value))
         autoZmodem = (try? c.decode(Bool.self, forKey: .autoZmodem)) ?? d.autoZmodem
-        useLrzszForZmodem = (try? c.decode(Bool.self, forKey: .useLrzszForZmodem)) ?? d.useLrzszForZmodem
         zmodem = ((try? c.decode(ZmodemOptions.self, forKey: .zmodem)) ?? d.zmodem).sanitized
         xmodem1K = (try? c.decode(Bool.self, forKey: .xmodem1K)) ?? d.xmodem1K
         autoReconnect = (try? c.decode(Bool.self, forKey: .autoReconnect)) ?? d.autoReconnect

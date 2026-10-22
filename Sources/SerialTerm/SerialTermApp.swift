@@ -26,7 +26,7 @@ struct SerialTermApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Writing to a transfer program that has just exited must not kill the app.
+        // A write to a pipe or socket whose reader has gone must fail, not kill the app.
         signal(SIGPIPE, SIG_IGN)
         // Needed when run unbundled via `swift run`; harmless inside a .app.
         NSApp.setActivationPolicy(.regular)

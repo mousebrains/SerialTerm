@@ -4,7 +4,7 @@ SerialTerm is a Swift package with two targets:
 
 | Target | Depends on | Contents |
 |---|---|---|
-| `SerialCore` (library) | Foundation only | Serial I/O, session routing, logging, file transfer (native ZMODEM, lrzsz runner) |
+| `SerialCore` (library) | Foundation only | Serial I/O, session routing, logging, file transfer (ZMODEM, YMODEM, XMODEM) |
 | `SerialTerm` (macOS app) | SerialCore, SwiftUI/AppKit, IOKit, [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) | Windows, settings, port discovery, terminal display |
 
 `SerialCore` doesn't use AppKit or SwiftUI, so it can be tested without a UI and, eventually,
@@ -22,14 +22,18 @@ Sources/SerialCore/
   LogFile.swift            append-only file for logs and traces: never replaces a file, never raises
   PacedSender.swift        paced typing (characters per second, line pause, wait for echo)
   ZmodemDetector.swift     finds ZRQINIT/ZRINIT in the incoming stream (split-safe)
-  FileTransfer.swift       FileTransfer protocol; TransferKind; ExternalTransfer (lrzsz)
+  FileTransfer.swift       FileTransfer protocol; TransferKind; remote receive commands
   Zmodem/
     ZmodemFrames.swift     constants, ZHeader, CRC-16/32, ZEncoder (escaping, headers, subpackets)
     ZmodemReader.swift     ByteChannel (blocking inbox), ZReader (header/subpacket decoder)
     ZmodemSender.swift     ZLink (output batching, tracing, progress), ZmodemSender
     ZmodemReceiver.swift   ZmodemReceiver, file-offer parsing, safe file names
     ZmodemTransfer.swift   FileTransfer adapter: runs sender/receiver on its own thread
-    ZmodemTrace.swift      ZmodemOptions; trace writer; header descriptions
+    ZmodemTrace.swift      ZmodemOptions; trace writer (all protocols); header descriptions
+  Xmodem/
+    XmodemTransfer.swift   wire constants, block and YMODEM header encoding; FileTransfer adapter
+    XmodemSender.swift     XmodemSender (XMODEM, YMODEM batches)
+    XmodemReceiver.swift   XmodemReceiver (XMODEM to a chosen file, YMODEM into a folder)
 Sources/SerialTerm/
   SerialTermApp.swift      @main, Settings scene, app delegate
   ContentView.swift        toolbar, connect bar, status bar, settings views
@@ -69,10 +73,9 @@ Sources/SerialTerm/
 | Main | UI, `TerminalModel`, feeding SwiftTerm, file pickers |
 | `SerialPort.read` | Reads the port; `Session` routing; ZMODEM detection; hands data to the log (escaped on the logger's queue) |
 | `SerialPort.write` | Writes in order; waits on `poll(POLLOUT)` when the driver is full |
-| `ZMODEM` (one `Thread` per transfer) | Runs the sender or receiver as blocking, sequential code |
+| `ZMODEM`, `XMODEM` (one `Thread` per transfer) | Runs the sender or receiver as blocking, sequential code |
 | `SessionLogger`, `ZmodemTrace` | Serial queues for file writes |
 | `PacedSender` | Serial queue that times typed text (and the receive commands typed for transfers) |
-| lrzsz pipes | `FileHandle` readability handlers (lrzsz transfers only); the stdout handler blocks while the port's backlog is full |
 
 `Session`'s settings (download folder, ZMODEM options, …) are written on the main thread and
 read on the read queue when a transfer starts automatically, so they are kept under its lock.
@@ -83,25 +86,25 @@ so a call can't reach a descriptor number that was closed and reused by another 
 `DisplayBuffer` collects them and schedules at most one main-thread update at a time, so the
 display can't flood the main queue.
 
-**The transfer thread model**: ZMODEM is written as straightforward blocking code, like lrzsz,
-rather than as a callback state machine. `ByteChannel` turns the serial input into a blocking
+**The transfer thread model**: ZMODEM, YMODEM and XMODEM are written as straightforward blocking
+code, like lrzsz, rather than as callback state machines. `ByteChannel` turns the serial input into a blocking
 read with a timeout (an `NSCondition`). `ZReader` adds a local buffer, one byte of push-back, and
 a history used for error snapshots. Timeouts and deadlines use `Uptime` (system uptime), not
 `Date`, so a clock change can't stretch them. A reader deadline bounds a wait however steadily
 bytes arrive. Cancelling drops queued output and wakes the reader, which then throws; the sender
 also checks for a cancel between subpackets, since it reads only when input is waiting.
 
-**Leftover input**: when a ZMODEM transfer ends, `ZmodemTransfer` passes input it didn't use to
-`onLeftover`, and the session logs and displays it without scanning it for transfers. That is
-the remote's prompt after the transfer, or everything received if no file was ever offered (a
-false automatic start). Input arriving after the end goes the same way until the session has
+**Leftover input**: when a transfer ends, it passes input it didn't use to `onLeftover`, and the
+session logs and displays it without scanning it for transfers. That is the remote's prompt after
+the transfer, or everything received if the remote never got going: no file offered (a false
+automatic start), no block received, or no receiver asking for one (a shell's "rx: not found"). Input arriving after the end goes the same way until the session has
 let go of the transfer.
 
 **Back-pressure**: senders call `waitForOutput(maxPending:)`. `SerialPort` counts bytes queued but
 not yet accepted by the driver, so a sender can keep the driver busy (a 64 KB backlog) without
-queuing an unbounded amount, and a `ZRPOS` rewind wastes little. The lrzsz runner waits the same
-way after passing on each chunk of the program's output, which blocks the program as a tty would.
-The wait gives up when the transfer is cancelled, so flow control holding the line can't block a
+queuing an unbounded amount, and a `ZRPOS` rewind wastes little. XMODEM and YMODEM send a block
+and wait for its ACK, so they only wait for the block to reach the driver before timing the
+reply. The wait gives up when the transfer is cancelled, so flow control holding the line can't block a
 cancel. `discardPendingWrites` drops queued writes, stops the one in progress, and flushes the
 driver (`TCOFLUSH`).
 
@@ -111,8 +114,8 @@ disconnecting mid-transfer uses `closeInBackground`, so the main thread isn't he
 that port, or quitting, waits for the close to finish. A failed write closes the port with the
 error, as a failed read does. The port is opened with `O_CLOEXEC`.
 
-**Sending files**: the ZMODEM sender reads each file through its own descriptor (`SendFile`, with
-a 64 KB cache) rather than mapping it: touching a mapped file whose volume has gone raises
+**Sending files**: the senders read each file through its own descriptor (`SendFile`, with a
+64 KB cache) rather than mapping it: touching a mapped file whose volume has gone raises
 SIGBUS. A file that gets shorter during the send fails it.
 
 ## Session routing
@@ -142,21 +145,46 @@ starts that fail three times within 30 s pause automatic starts for 30 s.
 public protocol FileTransfer: AnyObject, Sendable {
     var onOutput: ((Data) -> Void)? { get set }                    // bytes for the line
     var waitForOutput: ((_ maxPending: Int) -> Void)? { get set }  // back-pressure
+    var discardOutput: (() -> Void)? { get set }                   // drop what's queued
     var onStatus: ((String) -> Void)? { get set }                  // progress line
     var onLog: ((String) -> Void)? { get set }                     // session-log notes
     var onFinish: ((Bool, String) -> Void)? { get set }
+    var typeReceiveCommand: ((String) -> Void)? { get set }        // "rz", "rx 'name'", "rb"
+    var onLeftover: ((Data) -> Void)? { get set }                  // input that wasn't the transfer
+    var traceURL: URL? { get }
     func start() throws
     func feed(_ data: Data)
     func cancel()
 }
 ```
 
-- `ZmodemTransfer`: the native implementation (see [ZMODEM](zmodem.md)).
-- `ExternalTransfer`: runs `lrz`/`lsz`/`lrb`/`lsb`/`lrx`/`lsx` with their standard input and
-  output piped to the serial line. It searches `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`,
-  then `PATH`. Receives run in a private folder inside the download folder; when the program
-  exits, the files are moved out under the native receiver's safe names. Cancel sends SIGTERM,
-  then SIGKILL after 2 s.
+- `ZmodemTransfer`: ZMODEM (see [ZMODEM](zmodem.md)).
+- `XmodemTransfer`: XMODEM and YMODEM, sharing ZMODEM's plumbing (`ByteChannel`, `ZReader`,
+  `ZLink` for output, progress and tracing) and its receiver's safe names, never-overwrite file
+  creation and quarantine. XMODEM accepts CRC-16 or the checksum and 128- or 1024-byte blocks in
+  both directions; a receive asks for CRC-16 until three requests have met silence, then for the
+  checksum, and the first block's length settles which the sender uses. YMODEM always uses
+  CRC-16 and 1K blocks, with block 0 carrying the ZMODEM-style "name size mtime mode" fields; a
+  file that arrives shorter than announced fails.
+
+  What the receiver must not mistake: an EOT is one unchecked byte, so a 0x04 counts only as the
+  first byte since its last answer with quiet after it (one in a block whose start byte was lost
+  would end the file early and be reported complete), and it is NAKed once and never taken alone.
+  Two CANs abort where a block should start, five among other bytes. After a bad block it waits
+  for the line to go quiet, however long the block takes, and NAKs once.
+
+  ACKs carry no block number, so a second copy of a block in flight makes every later ACK count
+  for the next block, and a damaged last block is then lost with both ends reporting success.
+  The sender avoids second copies: it waits a minute for a reply, as lrzsz's does, and lets the
+  receiver's NAKs (every few seconds while it waits) drive resends; after a NAK it waits for the
+  receiver to go quiet for a second, taking further NAKs as part of it (lrzsz's rx clears at most
+  1000 bytes of a bad block before its first NAK, and NAKs again for the rest); and a repeated 'C' that may have crossed the first block gets time for the block's own
+  answer. As a backstop, after the last block's ACK it waits a moment: a NAK then means the ACKs
+  were a block behind, and the last block goes again. If the remote's shell answers instead of an
+  ACK for EOT, the receiver has finished; another EOT would be a ^D at the shell.
+
+  An XMODEM receive is written to a new file beside the chosen one and replaces it only when
+  complete.
 
 ## Port discovery
 

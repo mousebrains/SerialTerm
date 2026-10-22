@@ -26,27 +26,19 @@ detailed protocol diagnostics, and millisecond-timestamped session logs.
   - starts automatically when the remote runs `sz` or `rz`; you can also drop files on the window;
   - never overwrites an existing file, removes partial files on failure, and refuses remote
     commands.
-- **ZMODEM diagnostics**: each transfer writes a decoded protocol trace (headers, flags, file offers,
-  errors, retries, and raw-byte snapshots around errors). Settings let you work around unusual
-  implementations.
-- **XMODEM / YMODEM**: through [lrzsz](https://ohse.de/uwe/software/lrzsz.html) for now.
-  SerialTerm types the device's `rx`/`rb` for you, and XMODEM receive starts when the device's `sx`
-  announces itself.
+- **XMODEM / YMODEM, built in**: XMODEM with CRC-16 or checksum, in 128- or 1024-byte blocks;
+  YMODEM batches with file names and sizes. SerialTerm types the device's `rx`/`rb` for you, and
+  XMODEM receive starts when the device's `sx` announces itself.
+- **Diagnostics**: each transfer writes a decoded protocol trace (headers or blocks, flags, file
+  offers, errors, retries, and raw-byte snapshots around errors). Settings let you work around
+  unusual ZMODEM implementations.
 - **Logging**: session logs with millisecond timestamps, with RX and TX marked and non-printing
   bytes escaped.
 
 ## Install
 
 Requires macOS 15 (Sequoia) or later. There is no release yet: until the first one, build from
-source (below). Homebrew and the download will work from the first release on.
-
-- **Homebrew** (from the first release): builds from source, so macOS doesn't block it, and
-  installs lrzsz too. Needs Xcode 26 or the Command Line Tools 26 or later.
-
-  ```sh
-  brew install mousebrains/tap/serialterm
-  serialterm                     # opens the app; `brew info serialterm` shows how to add it to Applications
-  ```
+source (below). The download will work from the first release on.
 
 - **Download** (from the first release): get `SerialTerm.zip` from
   [Releases](https://github.com/mousebrains/SerialTerm/releases).
@@ -60,8 +52,6 @@ source (below). Homebrew and the download will work from the first release on.
   cd SerialTerm
   ./scripts/make-app.sh          # → build/SerialTerm.app
   ```
-
-For XMODEM/YMODEM (and an optional lrzsz-based ZMODEM): `brew install lrzsz`.
 
 ## Quick start
 
@@ -79,7 +69,7 @@ See the [User Guide](docs/user-guide.md) for everything else.
 | | |
 |---|---|
 | [User Guide](docs/user-guide.md) | Connecting, settings, logging, file transfers, troubleshooting |
-| [ZMODEM & Diagnostics](docs/zmodem.md) | What the built-in ZMODEM supports, trace format, workarounds |
+| [ZMODEM & Diagnostics](docs/zmodem.md) | What the built-in ZMODEM supports, trace format (all protocols), workarounds |
 | [Architecture](docs/architecture.md) | Modules, threading, data flow |
 | [Development](docs/development.md) | Building, testing (including against real hardware), CI, releasing |
 | [Changelog](CHANGELOG.md) | |
@@ -94,18 +84,18 @@ simulated noisy line, and on a Rockland MicroRider (native USB serial) in both d
 | MicroRider → Mac | 262 KB – 134.6 MB; batch of 3 (183 MB) | MD5 verified; ~9.6 MB/s; occasional lost USB data recovered automatically |
 | Mac → MicroRider | batch of 3 (193.5 MB) | MD5 verified; ~2.3 MB/s, which is the MicroRider's receive limit (raw: 4.5 MB/s, 3.0 MB/s to storage) |
 
-XMODEM and YMODEM (via lrzsz) are also verified on the MicroRider in both directions. ZMODEM's
-error recovery has changed since these runs (from testing with a TWR Slocum glider and a code
-review, [#4](https://github.com/mousebrains/SerialTerm/issues/4)); it will be checked on the
-hardware again before the first release.
-
-Next: native XMODEM/YMODEM. See the [Changelog](CHANGELOG.md) for details.
+XMODEM and YMODEM were verified on the MicroRider in both directions when SerialTerm ran them
+through lrzsz. The built-in XMODEM and YMODEM that replaced it are tested against lrzsz in both
+directions, cleanly and over a simulated noisy line, but not yet on hardware. ZMODEM's error
+recovery has also changed since the hardware runs (from testing with a TWR Slocum glider and code
+reviews, [#4](https://github.com/mousebrains/SerialTerm/issues/4) and
+[#9](https://github.com/mousebrains/SerialTerm/issues/9)). All three will be checked on the hardware
+again before the first release. See the [Changelog](CHANGELOG.md) for details.
 
 ## License
 
 Copyright © 2026 Pat Welch. SerialTerm is free software, licensed under the
 [GNU General Public License v3.0 or later](LICENSE).
 
-It uses [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) (MIT). For XMODEM/YMODEM it runs
-[lrzsz](https://ohse.de/uwe/software/lrzsz.html) (GPL) as a separate program if you've installed
-it; lrzsz is not included.
+It uses [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) (MIT). The tests use
+[lrzsz](https://ohse.de/uwe/software/lrzsz.html) (GPL) as the remote side; the app doesn't need it.

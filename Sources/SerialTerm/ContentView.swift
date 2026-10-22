@@ -256,7 +256,7 @@ struct ContentView: View {
             Divider()
             Button("Cancel Transfer") { model.cancelTransfer() }
                 .disabled(!model.isTransferring)
-            Button("Open Last ZMODEM Trace") { model.openLastTrace() }
+            Button("Open Last Transfer Trace") { model.openLastTrace() }
                 .disabled(model.lastTraceURL == nil)
             Button("Show Download Folder") { model.revealDownloads() }
         } label: {
@@ -501,9 +501,8 @@ struct SettingsWindow: View {
                     FolderRow(title: "Save received files to", url: $settings.prefs.downloadDirectory)
                     FolderRow(title: "Choose files to send from", url: $settings.prefs.uploadDirectory)
                 }
-                Section("ZMODEM") {
+                Section("Automatic transfers") {
                     Toggle("Start transfers automatically (remote sz/rz, and lrzsz sx/sb)", isOn: $settings.prefs.autoZmodem)
-                    Toggle("Use lrzsz instead of the built-in ZMODEM", isOn: $settings.prefs.useLrzszForZmodem)
                 }
                 Section {
                     Picker("Protocol trace", selection: $settings.prefs.zmodem.traceLevel) {
@@ -512,9 +511,9 @@ struct SettingsWindow: View {
                         Text("Frames + raw bytes").tag(ZmodemOptions.TraceLevel.verbose)
                     }
                 } header: {
-                    Text("ZMODEM diagnostics")
+                    Text("Diagnostics")
                 } footer: {
-                    Text("One trace file per transfer, in the log folder. \"Frames\" decodes every header, file offer, error and retry; \"raw bytes\" adds a hex dump of everything on the line.")
+                    Text("One trace file per transfer (ZMODEM, YMODEM or XMODEM), in the log folder. \"Frames\" decodes every header, file offer, error and retry; \"raw bytes\" adds a hex dump of everything on the line.")
                         .foregroundStyle(.secondary)
                 }
                 Section {
@@ -544,7 +543,7 @@ struct SettingsWindow: View {
                 } header: {
                     Text("XMODEM / YMODEM")
                 } footer: {
-                    Text("These use lrzsz (brew install lrzsz). 1K blocks are much faster on links with delay; turn this off if a device only accepts classic 128-byte XMODEM.")
+                    Text("1K blocks are much faster on links with delay; turn this off if a device only accepts classic 128-byte XMODEM. YMODEM always sends 1K blocks.")
                         .foregroundStyle(.secondary)
                 }
             }

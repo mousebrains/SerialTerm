@@ -40,7 +40,7 @@ jobs:
           swift --version
           echo "name=$(basename "$XCODE" .app)" >> "$GITHUB_OUTPUT"
 
-      - name: Install lrzsz (interop tests, XMODEM/YMODEM)
+      - name: Install lrzsz (the remote side in the interop tests)
         run: brew install lrzsz
 
       # Keyed by Xcode too: a .build from another toolchain can fail to link or import.
@@ -112,7 +112,7 @@ jobs:
       - name: Test with Thread Sanitizer
         run: |
           swift test --sanitize=thread --filter \
-            'PacingTests|PacingCancelTests|PacedSessionTests|SerialPortPtyTests|SerialPortRobustnessTests|SessionLifecycleTests|LogFileTests|ExternalTransferBehaviourTests|ZmodemSessionLeftoverTests|ZmodemReceiverRobustnessTests' \
+            'PacingTests|PacingCancelTests|PacedSessionTests|SerialPortPtyTests|SerialPortRobustnessTests|SessionLifecycleTests|LogFileTests|TransferStartTests|ZmodemSessionLeftoverTests|ZmodemReceiverRobustnessTests|XmodemNativeTransferTests|XmodemScriptedTests' \
             2>&1 | tee tsan.log
           if grep -q "WARNING: ThreadSanitizer" tsan.log; then
             echo "::error::Thread Sanitizer reported a data race"

@@ -1,8 +1,8 @@
 # ZMODEM & Diagnostics
 
 SerialTerm has its own ZMODEM implementation (`Sources/SerialCore/Zmodem/`). This page covers what
-it supports, how it behaves, how to read its protocol traces, and the settings that work around
-unusual peers.
+it supports, how it behaves, how to read its protocol traces (XMODEM and YMODEM write them too),
+and the settings that work around unusual peers.
 
 - [What's supported](#whats-supported)
 - [Automatic start](#automatic-start)
@@ -11,8 +11,8 @@ unusual peers.
 - [Error recovery](#error-recovery)
 - [Protocol traces](#protocol-traces)
 - [Reading a trace](#reading-a-trace)
+- [XMODEM and YMODEM traces](#xmodem-and-ymodem-traces)
 - [Workarounds](#workarounds)
-- [lrzsz fallback](#lrzsz-fallback)
 - [Testing](#testing)
 
 ## What's supported
@@ -137,11 +137,12 @@ or the connection during a transfer cancels it the same way.
 
 ## Protocol traces
 
-Every built-in ZMODEM transfer writes a trace to the log folder, named
-`SerialTerm-YYYY-MM-DD-HHMMSS-zmodem.log`. The trace is written whether or not session logging is
-on. Open the latest one with **Transfer ▸ Open Last ZMODEM Trace** (it opens in Console).
+Every transfer writes a trace to the log folder, named `SerialTerm-YYYY-MM-DD-HHMMSS-zmodem.log`
+(`-ymodem.log`, `-xmodem.log` for those protocols). The trace is written whether or not session
+logging is on. Open the latest one with **Transfer ▸ Open Last Transfer Trace** (it opens in
+Console).
 
-Choose the level in Settings ▸ Transfers ▸ ZMODEM diagnostics:
+Choose the level in Settings ▸ Transfers ▸ Diagnostics:
 
 | Level | Contents |
 |---|---|
@@ -210,6 +211,28 @@ How to read it:
 - **Serial reads**: each read from the port with its arrival time. A long gap just before the error
   suggests the Mac fell behind. Evenly spaced reads point to the device or the link.
 
+## XMODEM and YMODEM traces
+
+These protocols have no headers; the trace shows what they do have, at the same two levels:
+
+- the handshake: `TX 'C'` (asking for CRC-16) or `TX NAK (checksum mode)` from a receiver, and
+  `XMODEM receiver ready (CRC-16)` on the sending side;
+- YMODEM's block 0, decoded like a ZMODEM file offer (`block 0: file "name" fields "…"`), and
+  `block 0: end of batch`;
+- every damaged block with the reason (`bad block: CRC-16 mismatch in block 12`, `cut short after
+  991 of 1028 bytes`), the bytes purged before the NAK, and duplicates (`duplicate block 18;
+  acknowledging it again`: the ACK was lost);
+- every NAK received and each resend (`NAK for block 12`, `sending block 12 again (attempt 2)`),
+  further NAKs taken as part of one (`after the NAK: 15 15 (taken as part of it)`), and the EOT
+  exchange (a receiver NAKs the first EOT, in case it was noise);
+- what was recognised as not being what it looked like: `0x04 with more bytes right behind it:
+  not an EOT` (data from a block whose start byte was lost), `'C' again for block 1; waiting for
+  its answer`, `A late ACK after block 40: the ACKs were a block behind`, `The remote's shell
+  answered instead of an ACK for EOT`;
+- a summary with blocks, bad blocks and NAKs in each direction.
+
+Frames + raw bytes adds a line per block and the hex dump of all line traffic.
+
 ## Workarounds
 
 Settings ▸ Transfers ▸ ZMODEM workarounds. The defaults suit lrzsz and most implementations. Each
@@ -224,13 +247,6 @@ setting is tested against lrzsz in both directions.
 | Timeout | 10 s | The link or the peer is slow to respond (satellite, radio modems) |
 
 **Restore Defaults** resets these settings but keeps the trace level.
-
-## lrzsz fallback
-
-Settings ▸ Transfers ▸ *Use lrzsz instead of the built-in ZMODEM* runs `lrz`/`lsz` (from
-`brew install lrzsz`) with their standard input and output connected to the serial port, the way
-minicom does. No trace is written in this mode; the status bar shows lrzsz's own progress
-messages. This is useful for checking whether a problem is in the device or in SerialTerm.
 
 ## Testing
 
@@ -248,6 +264,9 @@ messages. This is useful for checking whether a problem is in the device or in S
   hostile file names and symlinks;
 - native ZMODEM against lrzsz in both directions, over a pseudo-terminal pair, both cleanly and
   over a noisy line, and with each workaround setting;
+- XMODEM and YMODEM against themselves (every block-boundary size, checksum and CRC, a noisy line
+  both ways, cancel from either end, scripted peers for the handshake and EOT) and against lrzsz
+  in both directions, cleanly and over a noisy line;
 - cancelling, timeouts, an unanswered sender, and file naming;
 - trace contents, including error snapshots for damaged and lost data.
 
