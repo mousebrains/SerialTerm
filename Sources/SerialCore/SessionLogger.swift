@@ -46,45 +46,50 @@ public final class SessionLogger: @unchecked Sendable {
         return "SerialTerm-\(f.string(from: date)).log"
     }
 
+    /// Escaped on the logger's queue, not the caller's: that is usually the serial read queue,
+    /// which has to keep up with the line.
     public func log(_ direction: Direction, _ data: Data, at date: Date = Date()) {
         guard !data.isEmpty else { return }
-        write(direction, Self.escape(data), at: date)
+        write(direction, at: date) { Self.escape(data) }
     }
 
     /// Notes may quote the remote (file names, lrzsz messages), so control and invisible
     /// formatting characters are escaped: a note can't start a fake log line.
     public func note(_ text: String, at date: Date = Date()) {
-        write(.note, Self.escapeNote(text), at: date)
+        write(.note, at: date) { Self.escapeNote(text) }
     }
 
     public func flush() {
         queue.sync { file.synchronize() }
     }
 
-    private func write(_ direction: Direction, _ text: String, at date: Date) {
+    private func write(_ direction: Direction, at date: Date, _ text: @escaping () -> String) {
         queue.async { [self] in
-            let line = "\(formatter.string(from: date)) \(direction.rawValue) \(text)\n"
+            let line = "\(formatter.string(from: date)) \(direction.rawValue) \(text())\n"
             if let error = file.write(Data(line.utf8)) { onFailure?(error) }
         }
     }
 
+    private static let hexDigits = Array("0123456789ABCDEF".utf8)
+
     /// Printable ASCII is kept as-is; everything else is escaped so a log line is
     /// always one line and binary data is unambiguous.
     public static func escape(_ data: Data) -> String {
-        var out = ""
-        out.reserveCapacity(data.count)
+        let backslash = UInt8(ascii: "\\")
+        var out: [UInt8] = []
+        out.reserveCapacity(data.count + data.count / 2)
         for byte in data {
             switch byte {
-            case 0x0D: out += "\\r"
-            case 0x0A: out += "\\n"
-            case 0x09: out += "\\t"
-            case 0x1B: out += "\\e"
-            case 0x5C: out += "\\\\"
-            case 0x20...0x7E: out.unicodeScalars.append(Unicode.Scalar(byte))
-            default: out += String(format: "\\x%02X", byte)
+            case 0x0D: out += [backslash, UInt8(ascii: "r")]
+            case 0x0A: out += [backslash, UInt8(ascii: "n")]
+            case 0x09: out += [backslash, UInt8(ascii: "t")]
+            case 0x1B: out += [backslash, UInt8(ascii: "e")]
+            case 0x5C: out += [backslash, backslash]
+            case 0x20...0x7E: out.append(byte)
+            default: out += [backslash, UInt8(ascii: "x"), hexDigits[Int(byte >> 4)], hexDigits[Int(byte & 0x0F)]]
             }
         }
-        return out
+        return String(decoding: out, as: UTF8.self)
     }
 
     /// Text is kept, except line breaks, control characters and invisible formatting characters

@@ -70,6 +70,19 @@ struct LogFileTests {
         #expect(failures.all.count == 1)
     }
 
+    /// Escaping used to run on the caller's queue (the serial read queue) and take ~22 ms per
+    /// 64 KB of binary data in release builds, holding up reads of a fast line.
+    @Test func loggingLeavesTheEscapingToTheLogger() throws {
+        let logger = try SessionLogger(url: try tempDir().appendingPathComponent("t.log"))
+        let chunk = Data((0..<1_000_000).map { UInt8(truncatingIfNeeded: $0 &* 7) })
+        let start = Date()
+        logger.log(.rx, chunk)
+        #expect(Date().timeIntervalSince(start) < 0.05)
+        logger.flush()
+        let line = try String(contentsOf: logger.url, encoding: .utf8)
+        #expect(line.hasSuffix(" RX " + SessionLogger.escape(chunk) + "\n"))
+    }
+
     /// Notes quote remote file names; a newline in one used to forge a log line.
     @Test func notesAreOneLine() {
         #expect(SessionLogger.escapeNote("a\n2026-10-21 12:00:00.000 RX forged") == "a\\n2026-10-21 12:00:00.000 RX forged")
