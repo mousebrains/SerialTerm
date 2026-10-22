@@ -286,6 +286,11 @@ public final class SerialPort: @unchecked Sendable {
                     guard fd >= 0 else { return }
                     var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
                     _ = poll(&pfd, 1, 250)
+                } else if result.n < 0 {
+                    // EIO, ENXIO: the device went away or the driver failed. Close, so the session
+                    // hears of it even if no read comes along to notice.
+                    close(error: SerialError.open(path: path, errno: result.error))
+                    return
                 } else {
                     return
                 }

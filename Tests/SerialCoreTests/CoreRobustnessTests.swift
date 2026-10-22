@@ -150,22 +150,42 @@ struct SerialPortRobustnessTests {
         #expect(got < 200_000, "\(got) bytes still went out after the discard")
     }
 
+    /// Descriptors open on `path`.
+    private func descriptors(on path: String) -> Set<Int32> {
+        Set((0..<min(getdtablesize(), 4096)).filter { fd in
+            var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+            return fcntl(fd, F_GETPATH, &buffer) == 0 && String(cString: buffer) == path
+        })
+    }
+
     /// The port's descriptor used to be inherited by programs the app starts (the lrzsz runner).
     @Test func descriptorIsNotInherited() throws {
         let pty = try PtyPair()
-        func descriptors() -> Set<Int32> {
-            Set((0..<min(getdtablesize(), 4096)).filter { fd in
-                var path = [CChar](repeating: 0, count: Int(MAXPATHLEN))
-                return fcntl(fd, F_GETPATH, &path) == 0 && String(cString: path) == pty.slavePath
-            })
-        }
-        let before = descriptors()
+        let before = descriptors(on: pty.slavePath)
         let port = SerialPort(path: pty.slavePath, config: SerialConfig())
         try port.open()
         defer { port.close() }
-        let opened = descriptors().subtracting(before)
+        let opened = descriptors(on: pty.slavePath).subtracting(before)
         #expect(opened.count == 1)
         for fd in opened { #expect(fcntl(fd, F_GETFD) & FD_CLOEXEC != 0) }
+    }
+
+    /// A write error (device gone, driver fault) used to be ignored: the port stayed open, with
+    /// every write failing and nothing telling the session, unless a read happened to notice.
+    @Test func writeErrorClosesThePort() throws {
+        let pty = try PtyPair()
+        let before = descriptors(on: pty.slavePath)
+        let port = SerialPort(path: pty.slavePath, config: SerialConfig())
+        let closed = Inbox<Error?>()
+        port.onClose = { closed.add($0) }
+        try port.open()
+        defer { port.close() }
+        let fd = try #require(descriptors(on: pty.slavePath).subtracting(before).first)
+        breakWrites(to: fd)  // replaces the descriptor, which also ends the read side's events
+        port.write(Data("x".utf8))
+        #expect(closed.wait(timeout: 2) { !$0.isEmpty })
+        #expect(!port.isOpen)
+        #expect(closed.all.first.map { $0 != nil } == true, "closed with an error")
     }
 
     /// Waits on a line that isn't moving (flow control holding it) can time out or be stopped.
