@@ -339,10 +339,10 @@ final class XmodemSender {
     }
 
     /// After a NAK, before sending again: until the receiver has been quiet for `nakQuiet`. Some
-    /// NAK more than once for one damaged block (lrzsz's rx reads at most 1000 bytes of it before
-    /// answering, and again for the rest); a copy for each would be in flight together. And a
-    /// receiver clearing the damaged block from its input waits for the line to go quiet: sending
-    /// at once gives it no gap, and it cuts the new copy up too.
+    /// NAK more than once for one damaged block (lrzsz's rx sent ten for one whose start byte was
+    /// lost); a copy for each would be in flight together. And a receiver clearing the damaged
+    /// block from its input waits for the line to go quiet: sending at once gave lrx no gap, and
+    /// every copy was cut up until it gave up. lrzsz's own sx recovers there, and so does this.
     private func awaitQuiet() throws {
         let end = Uptime.now + timeout
         var more: [UInt8] = []
