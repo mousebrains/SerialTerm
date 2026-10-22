@@ -42,7 +42,7 @@ swift test -c release --filter ZmodemPerformanceTests         # throughput (rele
 | `CoreRobustnessTests` (several suites) | Log and trace files (name collisions, write failures, escaping), paced-typing cancel and echo matching, refused baud rates, discards and cancellable waits, lrzsz back-pressure and names, failed starts, closing mid-transfer, the automatic-start back-off |
 | `ZmodemSenderRobustnessTests` | The sender against scripted receivers and a rate-limited line (`SlowLine`, `FakeReceiver`): noise, cancel, lost replies, receivers that go quiet, go away or advertise a buffer |
 | `ZmodemReceiverRobustnessTests`, `ZmodemSessionLeftoverTests` | The receiver against broken and hostile senders; false automatic starts; the prompt after a transfer |
-| `SerialTermTests` (app target) | Port matching, preference decoding and clamping, preset names, baud parsing, the terminal mode reset |
+| `SerialTermTests` (app target) | Port matching, preference decoding and clamping, preset names, baud parsing, the terminal mode reset, the port scanner's cleanup, the window-close hook |
 | `ZmodemCodecTests` | CRC check values, header and subpacket round trips, escaping, file-name safety |
 | `ZmodemNativeTransferTests` | Native ↔ native: multi-file, block-boundary sizes, corrupted and dropped data, a corrupted back channel, cancel, timeouts, no overwriting |
 | `ZmodemDiagnosticsTests` | Trace contents at each level; error snapshots; workaround options on the wire |

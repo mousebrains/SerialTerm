@@ -21,6 +21,9 @@ struct TerminalContainer: NSViewRepresentable {
         view.terminalDelegate = context.coordinator
         view.onDropFiles = { [weak model] urls in model?.sendFiles(urls) }
         view.onTerminalSend = { [weak model] data, fromUser in model?.sendFromTerminal(data, fromUser: fromUser) }
+        // Close the port properly (log's closing lines, port released) rather than when SwiftUI
+        // happens to let go of the model.
+        view.onWindowClose = { [weak model] in model?.disconnect() }
         model.terminalView = view  // applies Option-as-Meta, Backspace and font settings
         DispatchQueue.main.async { view.window?.makeFirstResponder(view) }
         return view
@@ -59,8 +62,25 @@ final class SerialTerminalView: TerminalView {
     /// Bytes the terminal produced by itself (answers to queries, focus and mouse reports), or a
     /// paste (`fromUser`). Keys and typed text go to the delegate's `send` instead.
     var onTerminalSend: ((_ data: ArraySlice<UInt8>, _ fromUser: Bool) -> Void)?
+    /// The window showing this view is closing. Not called for tab switches or minimizing.
+    var onWindowClose: (() -> Void)?
 
     private var pasting = false
+    private var closeObserver: NSObjectProtocol?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let closeObserver { NotificationCenter.default.removeObserver(closeObserver) }
+        closeObserver = window.map { window in
+            NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) {
+                [weak self] _ in MainActor.assumeIsolated { self?.onWindowClose?() }
+            }
+        }
+    }
+
+    deinit {
+        if let closeObserver { NotificationCenter.default.removeObserver(closeObserver) }
+    }
 
     override func paste(_ sender: Any) {
         pasting = true

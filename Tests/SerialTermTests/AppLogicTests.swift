@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Pat Welch
 
+import AppKit
 import Foundation
 import SerialCore
 import SwiftTerm
@@ -45,6 +46,20 @@ struct PortMatchingTests {
         #expect(SerialPortInfo.find(path: "/dev/cu.wchusbserial1410", serialNumber: nil, interface: nil, in: ports)?.path
             == "/dev/cu.wchusbserial1410")
         #expect(SerialPortInfo.find(path: "/dev/cu.wchusbserial1411", serialNumber: "", interface: nil, in: ports) == nil)
+    }
+
+    /// A device without a serial number was matched by name alone, so another device that has one,
+    /// plugged into the same socket (CDC devices are named after the USB location), was taken for
+    /// it and auto-reconnected to.
+    @Test func aDeviceWithASerialNumberIsNotTakenForOneWithout() {
+        let other = [usb("cu.usbmodem14101", sn: "A50285BI")]
+        #expect(SerialPortInfo.find(path: "/dev/cu.usbmodem14101", serialNumber: nil, interface: nil, in: other) == nil)
+        // An empty serial number counts as none, on either side.
+        let blank = [usb("cu.usbmodem14101", sn: "")]
+        #expect(SerialPortInfo.find(path: "/dev/cu.usbmodem14101", serialNumber: nil, interface: nil, in: blank)?.path
+            == "/dev/cu.usbmodem14101")
+        #expect(SerialPortInfo.find(path: "/dev/cu.usbmodem14101", serialNumber: "", interface: nil, in: blank)?.path
+            == "/dev/cu.usbmodem14101")
     }
 
     /// Choosing a port without a serial number used to keep the previous port's, so auto-reconnect
@@ -206,5 +221,60 @@ struct TerminalModeResetTests {
         t.feed(text: "\u{1b}7\u{1b}[H\u{1b}[10;20H")  // a saved cursor at home must not be restored
         t.feed(text: TerminalModeReset.sequence)
         #expect(t.getCursorLocation().x == 19 && t.getCursorLocation().y == 9)
+    }
+}
+
+/// Mach port names this task holds.
+private func machPortNames() -> Int {
+    var names: mach_port_name_array_t?
+    var namesCount: mach_msg_type_number_t = 0
+    var types: mach_port_type_array_t?
+    var typesCount: mach_msg_type_number_t = 0
+    guard mach_port_names(mach_task_self_, &names, &namesCount, &types, &typesCount) == KERN_SUCCESS else { return -1 }
+    if let names {
+        vm_deallocate(mach_task_self_, vm_address_t(UInt(bitPattern: names)),
+                      vm_size_t(namesCount) * vm_size_t(MemoryLayout<mach_port_name_t>.size))
+    }
+    if let types {
+        vm_deallocate(mach_task_self_, vm_address_t(UInt(bitPattern: types)),
+                      vm_size_t(typesCount) * vm_size_t(MemoryLayout<mach_port_type_t>.size))
+    }
+    return Int(namesCount)
+}
+
+@MainActor
+struct PortScannerTests {
+    /// A released scanner kept its IOKit notification port and iterators, and left its run loop
+    /// source on the main run loop with a dangling pointer for the next hot-plug.
+    @Test func releasingAScannerFreesItsPorts() {
+        _ = PortScanner()  // first use of IOKit sets up ports of its own
+        let before = machPortNames()
+        for _ in 0..<50 { _ = PortScanner() }
+        let after = machPortNames()
+        #expect(before > 0)
+        #expect(after - before < 30, "\(after - before) Mach ports more after 50 scanners came and went")
+    }
+}
+
+@MainActor
+struct TerminalViewWindowTests {
+    /// Closing a window didn't disconnect: the session went when SwiftUI let go of the model, so
+    /// the log missed its closing lines.
+    @Test func closingTheWindowIsReported() {
+        _ = NSApplication.shared
+        let view = SerialTerminalView(frame: NSRect(x: 0, y: 0, width: 200, height: 100), font: nil)
+        var closes = 0
+        view.onWindowClose = { closes += 1 }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100), styleMask: [.titled, .closable],
+                              backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false
+        window.contentView = view
+        let other = NSWindow(contentRect: .zero, styleMask: [.titled, .closable], backing: .buffered, defer: true)
+        other.isReleasedWhenClosed = false
+        other.close()  // another window closing isn't this one
+        #expect(closes == 0)
+        window.close()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        #expect(closes == 1)
     }
 }
