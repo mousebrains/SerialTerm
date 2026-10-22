@@ -148,6 +148,7 @@ extension ZmodemEndToEndTests {
         let session = Session(port: SerialPort(path: pty.slavePath, config: SerialConfig()),
                               downloadDirectory: fromRemote ? dst : src)
         session.xmodem1K = true
+        session.traceDirectory = try tempDir()
         let events = Inbox<SessionEvent>()
         session.onEvent = { events.add($0) }
         try session.open()
@@ -167,6 +168,10 @@ extension ZmodemEndToEndTests {
         defer { remote.stop() }
         finish(events, direction)
         if !fromRemote { remote.process.waitUntilExit() }
+        let ok = events.all.contains { if case .transferFinished(true, _) = $0 { true } else { false } }
+        if !ok, let url = session.lastTraceURL, let trace = try? String(contentsOf: url, encoding: .utf8) {
+            print("=== trace (lost block start, \(direction)) ===\n" + trace)  // diagnosable from CI's log
+        }
         #expect(try Data(contentsOf: out).prefix(4096) == Data(content), "\(direction)")
     }
 }

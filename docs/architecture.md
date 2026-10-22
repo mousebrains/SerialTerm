@@ -177,8 +177,8 @@ public protocol FileTransfer: AnyObject, Sendable {
   for the next block, and a damaged last block is then lost with both ends reporting success.
   The sender avoids second copies: it waits a minute for a reply, as lrzsz's does, and lets the
   receiver's NAKs (every few seconds while it waits) drive resends; after a NAK it waits for the
-  receiver to go quiet, taking further NAKs as part of it (lrzsz's rx sends several for one
-  block); and a repeated 'C' that may have crossed the first block gets time for the block's own
+  receiver to go quiet for a second, taking further NAKs as part of it (lrzsz's rx clears at most
+  1000 bytes of a bad block before its first NAK, and NAKs again for the rest); and a repeated 'C' that may have crossed the first block gets time for the block's own
   answer. As a backstop, after the last block's ACK it waits a moment: a NAK then means the ACKs
   were a block behind, and the last block goes again. If the remote's shell answers instead of an
   ACK for EOT, the receiver has finished; another EOT would be a ^D at the shell.

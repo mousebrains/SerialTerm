@@ -339,14 +339,16 @@ final class XmodemSender {
     }
 
     /// After a NAK, before sending again: until the receiver has been quiet for `nakQuiet`. Some
-    /// NAK more than once for one damaged block (lrzsz's rx sent ten for one whose start byte was
-    /// lost); a copy for each would be in flight together. And a receiver clearing the damaged
-    /// block from its input waits for the line to go quiet: sending at once gave lrx no gap, and
-    /// every copy was cut up until it gave up. lrzsz's own sx recovers there, and so does this.
+    /// NAK more than once for one damaged block; a copy for each would be in flight together. And
+    /// a receiver clears the damaged block from its input before it can take a new one: lrzsz's
+    /// rx (0.13.1) reads at most 1000 bytes of it, or until 0.1 s of quiet, then NAKs, so a 1K
+    /// block whose start byte was lost gets a second NAK once the rest has gone by. A copy sent
+    /// before that second NAK is cut up in turn; resending at once on every NAK, lrx sent ten and
+    /// gave up.
     private func awaitQuiet() throws {
         let end = Uptime.now + timeout
         var more: [UInt8] = []
-        while Uptime.now < end, let b = try? reader.byte(timeout: Self.nakQuiet, quiet: true) {
+        while Uptime.now < end, let b = try? reader.byte(timeout: nakQuiet, quiet: true) {
             if b == X.can && more.last == X.can { throw ZmodemError.remoteCancelled }
             more.append(b)
         }
@@ -354,7 +356,9 @@ final class XmodemSender {
         if !more.isEmpty { link.trace?.note("after the NAK: \(ZmodemTrace.hex(more)) (taken as part of it)") }
     }
 
-    static let nakQuiet: TimeInterval = 0.3
+    /// 1 s: the receiver's second NAK comes 0.1 s after the rest of the block has reached it,
+    /// later on a busy machine or a slow line. (Shorter with the short timeouts of tests.)
+    private var nakQuiet: TimeInterval { min(1, timeout / 10) }
 
     /// ACKs carry no block number: a late ACK still waiting from a block sent twice would be
     /// taken for the next block's. Drop what's pending before each block, but not an abort.

@@ -168,6 +168,9 @@ struct ZmodemEndToEndTests {
             }
             let stdinHandle = stdin.fileHandleForWriting
             let toRemoteMangler = toRemote
+            // Bytes a second to deliver to the remote at, as a real line trickles them in; unset,
+            // each read goes over at once.
+            let lineRate = ProcessInfo.processInfo.environment["SERIALTERM_TEST_LINE_BPS"].flatMap(Double.init)
             source = DispatchSource.makeReadSource(fileDescriptor: master, queue: DispatchQueue(label: "remote"))
             source.setEventHandler {
                 var buf = [UInt8](repeating: 0, count: 65_536)
@@ -177,7 +180,16 @@ struct ZmodemEndToEndTests {
                 }
                 if n > 0 {
                     let d = Data(buf[0..<n])
-                    try? stdinHandle.write(contentsOf: toRemoteMangler?.apply(d) ?? d)
+                    let out = toRemoteMangler?.apply(d) ?? d
+                    guard let lineRate else {
+                        try? stdinHandle.write(contentsOf: out)
+                        return
+                    }
+                    let piece = max(1, Int(lineRate / 200))  // ~5 ms each
+                    for i in stride(from: 0, to: out.count, by: piece) {
+                        try? stdinHandle.write(contentsOf: out[(out.startIndex + i)..<min(out.endIndex, out.startIndex + i + piece)])
+                        usleep(useconds_t(Double(piece) / lineRate * 1_000_000))
+                    }
                 }
             }
             source.resume()
