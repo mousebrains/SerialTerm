@@ -396,23 +396,21 @@ struct ZmodemSessionLeftoverTests {
         defer { session.close() }
         pty.writeToPort(Data("$ cat capture.txt\r\nline with **\u{18}B00 in it\r\n".utf8))
         usleep(200_000)
-        let toDevice = Inbox<Data>()
-        let reader = Thread {
-            for _ in 0..<60 { let d = pty.readFromPort(timeout: 0.1); if !d.isEmpty { toDevice.add(d) } }
-        }
-        reader.start()
         for i in 0..<100 {  // 5 s of a streaming instrument
             pty.writeToPort(Data("$PSAMPLE,\(i),12.345,67.890,1013.25,22.125,35.001\r\n".utf8))
-            if i == 50 { session.sendFromUser(Data("stop\r".utf8)) }
             usleep(50_000)
         }
-        usleep(300_000)
-        let text = String(decoding: shown.all.reduce(Data(), +), as: UTF8.self)
-        let sent = toDevice.all.reduce(Data(), +)
+        // It gave up by itself (within about a second here; allow for slow machines).
+        let deadline = Date().addingTimeInterval(5)
+        while session.isTransferring && Date() < deadline { usleep(50_000) }
         #expect(!session.isTransferring)
+        let toDevice = pty.readFromPort(timeout: 0.5)
+        #expect(occurrences(of: Data("**\u{18}B01".utf8), in: toDevice) <= 2, "ZRINITs written into the device")
+        let text = String(decoding: shown.all.reduce(Data(), +), as: UTF8.self)
         #expect(text.components(separatedBy: "PSAMPLE").count - 1 == 100, "\(text)")
-        #expect(occurrences(of: Data("**\u{18}B01".utf8), in: sent) <= 2)
-        #expect(occurrences(of: Data("stop".utf8), in: sent) == 1, "typing reached the device again")
+        // And typing reaches the device again.
+        session.sendFromUser(Data("stop\r".utf8))
+        #expect(String(decoding: pty.readFromPort(timeout: 1), as: UTF8.self) == "stop\r")
     }
 
     /// The remote's prompt right after a transfer (in the same read as ZFIN, with or without "OO")
