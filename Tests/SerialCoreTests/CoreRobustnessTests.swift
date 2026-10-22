@@ -173,8 +173,8 @@ struct ExternalTransferCommandTests {
         #expect(args.suffix(2) == ["--", "-ZZ.bin"])
         let (_, plain, _) = try ExternalTransfer.command(for: .xmodemReceive(URL(fileURLWithPath: "/tmp/ZZ.bin")))
         #expect(plain.last == "ZZ.bin" && !plain.contains("--"))
-        #expect(ExternalTransfer.remoteReceiveCommand(for: .xmodemSend(URL(fileURLWithPath: "/tmp/-x.bin"))) == "rx '--' '-x.bin'\r")
-        #expect(ExternalTransfer.remoteReceiveCommand(for: .xmodemSend(URL(fileURLWithPath: "/tmp/it's.bin"))) == "rx 'it'\\''s.bin'\r")
+        #expect(TransferKind.xmodemSend(URL(fileURLWithPath: "/tmp/-x.bin")).remoteReceiveCommand == "rx '--' '-x.bin'\r")
+        #expect(TransferKind.xmodemSend(URL(fileURLWithPath: "/tmp/it's.bin")).remoteReceiveCommand == "rx 'it'\\''s.bin'\r")
     }
 
     /// "\r\n" is one Character in Swift, so splitting on "\r" or "\n" kept CRLFs in messages.

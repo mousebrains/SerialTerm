@@ -325,7 +325,11 @@ public final class Session: @unchecked Sendable {
         }
         // Only now that it's running: type the remote's receive command if asked. The sender
         // (lsx, lsb) waits for the receiver, so the command can follow it.
-        if startRemote, let command = ExternalTransfer.remoteReceiveCommand(for: kind) {
+        if startRemote, let command = kind.remoteReceiveCommand {
+            if case let .xmodemSend(url) = kind, case let typed = TransferKind.typeable(url.lastPathComponent),
+               typed != url.lastPathComponent {
+                logger?.note("\(url.lastPathComponent) typed as \(typed): a terminal line can't carry all its characters")
+            }
             logger?.log(.tx, Data(command.utf8))
             typeCommand(command, wait: false)
         }

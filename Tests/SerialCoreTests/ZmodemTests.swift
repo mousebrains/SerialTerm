@@ -91,10 +91,23 @@ struct ZmodemCodecTests {
     }
 
     @Test func remoteReceiveCommands() {
-        #expect(ExternalTransfer.remoteReceiveCommand(for: .ymodemSend([URL(fileURLWithPath: "/a")])) == "rb\r")
-        #expect(ExternalTransfer.remoteReceiveCommand(for: .xmodemSend(URL(fileURLWithPath: "/x/it's here.bin")))
+        #expect(TransferKind.ymodemSend([URL(fileURLWithPath: "/a")]).remoteReceiveCommand == "rb\r")
+        #expect(TransferKind.xmodemSend(URL(fileURLWithPath: "/x/it's here.bin")).remoteReceiveCommand
             == "rx 'it'\\''s here.bin'\r")
-        #expect(ExternalTransfer.remoteReceiveCommand(for: .zmodemSend([URL(fileURLWithPath: "/a")])) == nil)
+        #expect(TransferKind.zmodemSend([URL(fileURLWithPath: "/a")]).remoteReceiveCommand == nil)
+    }
+
+    /// A newline in a file name used to end the typed `rx` command and run the rest at the
+    /// remote's shell; other control characters act on its tty, and on a 7-bit line UTF-8 bytes
+    /// such as 0x8A turn into them.
+    @Test(arguments: [("fw.bin\nreboot\n", "fw.bin_reboot_"), ("a\rb", "a_b"), ("a\u{03}b", "a_b"),
+                      ("a\u{7F}b", "a_b"), ("Ċ.bin", "__.bin"), ("-x\n", "-x_")])
+    func typedNamesAreOneLineOfPrintableASCII(name: String, typed: String) {
+        #expect(TransferKind.typeable(name) == typed)
+        // A URL may hold the name decomposed ("C" and U+0307 for "Ċ"); it's made safe either way.
+        let command = TransferKind.xmodemSend(URL(fileURLWithPath: "/x").appendingPathComponent(name)).remoteReceiveCommand
+        #expect(command.map { $0.utf8.dropLast().allSatisfy { (0x20...0x7E).contains($0) } } == true, "\(command ?? "")")
+        if name == "fw.bin\nreboot\n" { #expect(command == "rx 'fw.bin_reboot_'\r") }
     }
 
     @Test func fileInfoParsing() {
