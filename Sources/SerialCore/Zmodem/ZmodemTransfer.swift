@@ -27,6 +27,7 @@ public final class ZmodemTransfer: FileTransfer, @unchecked Sendable {
     public var onLeftover: ((Data) -> Void)?
     /// Protocol trace for this transfer, if tracing is on.
     public let trace: ZmodemTrace?
+    public var traceURL: URL? { trace?.url }
 
     private let directory: URL
     private let channel = ByteChannel()

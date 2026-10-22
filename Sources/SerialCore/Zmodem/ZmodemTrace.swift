@@ -79,6 +79,7 @@ public final class ZmodemTrace: @unchecked Sendable {
     var garbageBytes = 0
     var timeouts = 0
     var rposIn = 0, rposOut = 0
+    var naksIn = 0, naksOut = 0  // XMODEM/YMODEM
     var dataBytesIn = 0, dataBytesOut = 0
     var subpacketsIn = 0, subpacketsOut = 0
     // Raw byte counts: received bytes are counted on the serial queue, so these are locked.
@@ -97,11 +98,12 @@ public final class ZmodemTrace: @unchecked Sendable {
         formatter.dateFormat = "HH:mm:ss.SSS"
     }
 
-    public static func defaultFileName(for date: Date = Date()) -> String {
+    /// "SerialTerm-2026-10-20-103201-zmodem.log"; `protocolName` as in `TransferKind.protocolName`.
+    public static func defaultFileName(for date: Date = Date(), protocolName: String = "zmodem") -> String {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "yyyy-MM-dd-HHmmss"
-        return "SerialTerm-\(f.string(from: date))-zmodem.log"
+        return "SerialTerm-\(f.string(from: date))-\(protocolName).log"
     }
 
     var verbose: Bool { level == .verbose }
@@ -152,16 +154,25 @@ public final class ZmodemTrace: @unchecked Sendable {
         return bytes.count > limit ? shown + " …" : shown
     }
 
-    func summary(outcome: String, duration: TimeInterval) {
+    /// `blocks`: an XMODEM/YMODEM trace, which counts blocks and NAKs rather than headers,
+    /// subpackets and ZRPOS.
+    func summary(outcome: String, duration: TimeInterval, blocks: Bool = false) {
         let rate = duration > 0 ? Double(max(dataBytesIn, dataBytesOut)) / duration : 0
+        let counts = blocks
+            ? "blocks \(subpacketsIn) in / \(subpacketsOut) out"
+            : "headers \(headersIn) in / \(headersOut) out; data subpackets \(subpacketsIn) in / \(subpacketsOut) out"
+        let errors = blocks
+            ? "\(badSubpackets) bad blocks, \(garbageBytes) garbage bytes skipped, \(timeouts) timeouts; "
+                + "NAK \(naksIn) received / \(naksOut) sent"
+            : "\(badHeaders) bad headers, \(badSubpackets) bad subpackets, \(garbageBytes) garbage bytes skipped, "
+                + "\(timeouts) timeouts; ZRPOS \(rposIn) received / \(rposOut) sent"
         note("""
             summary: \(outcome)
                 duration \(String(format: "%.2f", duration)) s, payload \(dataBytesIn) in / \(dataBytesOut) out \
             (\(ByteCountFormatter.string(fromByteCount: Int64(rate), countStyle: .file))/s)
-                headers \(headersIn) in / \(headersOut) out; data subpackets \(subpacketsIn) in / \(subpacketsOut) out
+                \(counts)
                 raw line bytes \(rawBytesIn) in / \(rawBytesOut) out
-                errors: \(badHeaders) bad headers, \(badSubpackets) bad subpackets, \(garbageBytes) garbage bytes skipped, \
-            \(timeouts) timeouts; ZRPOS \(rposIn) received / \(rposOut) sent
+                errors: \(errors)
             """)
         queue.sync { file.synchronize() }
     }

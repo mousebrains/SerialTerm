@@ -38,7 +38,6 @@ public final class Session: @unchecked Sendable {
     // they live under `lock`.
     private struct Settings {
         var autoZmodem = true
-        var useExternalZmodem = false
         var zmodemOptions = ZmodemOptions()
         var xmodem1K = false
         var traceDirectory: URL?
@@ -51,11 +50,6 @@ public final class Session: @unchecked Sendable {
         get { lock.withLock { settings.autoZmodem } }
         set { lock.withLock { settings.autoZmodem = newValue } }
     }
-    /// Run ZMODEM through lrzsz instead of the built-in implementation.
-    public var useExternalZmodem: Bool {
-        get { lock.withLock { settings.useExternalZmodem } }
-        set { lock.withLock { settings.useExternalZmodem = newValue } }
-    }
     public var zmodemOptions: ZmodemOptions {
         get { lock.withLock { settings.zmodemOptions } }
         set { lock.withLock { settings.zmodemOptions = newValue } }
@@ -66,7 +60,7 @@ public final class Session: @unchecked Sendable {
         get { lock.withLock { settings.xmodem1K } }
         set { lock.withLock { settings.xmodem1K = newValue } }
     }
-    /// Where ZMODEM protocol traces go (one file per transfer).
+    /// Where protocol traces go (one file per transfer).
     public var traceDirectory: URL? {
         get { lock.withLock { settings.traceDirectory } }
         set { lock.withLock { settings.traceDirectory = newValue } }
@@ -81,7 +75,7 @@ public final class Session: @unchecked Sendable {
         get { lock.withLock { settings.zmodemReceiveCommand } }
         set { lock.withLock { settings.zmodemReceiveCommand = newValue } }
     }
-    /// The most recent ZMODEM trace file.
+    /// The most recent protocol trace file.
     public var lastTraceURL: URL? { lock.withLock { lastTrace } }
     /// Rate limit for typed and pasted text, and for the receive commands the session types
     /// (`rb`, `rx name`, `rz`). File transfers are never paced.
@@ -171,7 +165,7 @@ public final class Session: @unchecked Sendable {
             while lock.withLock({ transfer === active }) && Uptime.now < deadline { usleep(10_000) }
             if lock.withLock({ transfer === active }) {
                 port.discardPendingWrites()
-                port.write(ExternalTransfer.abortSequence)
+                port.write(TransferKind.abortSequence)
             }
             port.waitForPendingWrites(maxPending: 0, timeout: 1)
         }
@@ -257,12 +251,13 @@ public final class Session: @unchecked Sendable {
     // MARK: Transfers
 
     /// - Parameter primed: bytes already received that belong to the transfer (auto-start).
-    /// - Parameter startRemote: first type the remote's receive command (`rb`, `rx name`) for
-    ///   protocols whose sender doesn't start the receiver itself.
+    /// - Parameter startRemote: have the sender type the remote's receive command (`rb`,
+    ///   `rx name`) first, for protocols whose sender doesn't start the receiver itself.
     ///
-    /// Throws `TransferInProgress` (nothing else happens) or the reason the transfer couldn't be
-    /// set up. Once `transferStarted` has been sent, a failure to start is also reported with
-    /// `transferFinished` and thrown as `TransferStartFailed`.
+    /// Throws `TransferInProgress` (nothing else happens), or `TransferStartFailed` for a transfer
+    /// that couldn't start, which has also been reported with `transferStarted` and
+    /// `transferFinished`. Problems once it runs (a file that can't be read or saved) end it with
+    /// `transferFinished`.
     public func startTransfer(_ kind: TransferKind, primed: Data? = nil, startRemote: Bool = false) throws {
         try startTransfer(kind, primed: primed, startRemote: startRemote, automatic: false)
     }
@@ -274,27 +269,16 @@ public final class Session: @unchecked Sendable {
             starting = true
             return settings
         }
-        let t: FileTransfer
-        do {
-            t = try makeTransfer(kind, primed: primed, settings: s)
-        } catch {
-            lock.withLock { starting = false }
-            throw error
-        }
+        let t = makeTransfer(kind, primed: primed, startRemote: startRemote, settings: s)
         pacer.cancel()
-        let logger: SessionLogger? = lock.withLock {
-            starting = false
-            transfer = t
-            cancelRequested = false
-            if let url = (t as? ZmodemTransfer)?.trace?.url { lastTrace = url }
-            return self.logger
-        }
 
         t.onOutput = { [weak self] data in self?.port.write(data) }
-        if let z = t as? ZmodemTransfer {
-            z.typeReceiveCommand = { [weak self] command in self?.typeCommand(command, wait: true) }
-            z.onLeftover = { [weak self] data in self?.showAfterTransfer(data) }
+        t.typeReceiveCommand = { [weak self] command in
+            guard let self else { return }
+            self.lock.withLock { self.logger }?.log(.tx, Data(command.utf8))
+            self.typeCommand(command, wait: true)
         }
+        t.onLeftover = { [weak self] data in self?.showAfterTransfer(data) }
         t.waitForOutput = { [weak self, weak t] maxPending in
             self?.port.waitForPendingWrites(maxPending: maxPending, until: { [weak self, weak t] in
                 guard let self, let t else { return true }
@@ -319,8 +303,20 @@ public final class Session: @unchecked Sendable {
             if automatic && !cancelled { self.automaticResult(success: success) }
             self.onEvent?(.transferFinished(success: success, message: message))
         }
+        // Only now, with its callbacks set: a cancel or close can reach it from another thread.
+        let logger: SessionLogger? = lock.withLock {
+            starting = false
+            transfer = t
+            cancelRequested = false
+            if let url = t.traceURL { lastTrace = url }
+            return self.logger
+        }
 
         logger?.note("\(kind.displayName) started (transfer data not logged)")
+        if startRemote, case let .xmodemSend(url) = kind, case let typed = TransferKind.typeable(url.lastPathComponent),
+           typed != url.lastPathComponent {
+            logger?.note("\(url.lastPathComponent) typed as \(typed): a terminal line can't carry all its characters")
+        }
         onEvent?(.transferStarted(kind.displayName))
         do {
             try t.start()
@@ -334,31 +330,20 @@ public final class Session: @unchecked Sendable {
             onEvent?(.transferFinished(success: false, message: "\(error)"))
             throw TransferStartFailed(underlying: error)
         }
-        // Only now that it's running: type the remote's receive command if asked. The sender
-        // (lsx, lsb) waits for the receiver, so the command can follow it.
-        if startRemote, let command = kind.remoteReceiveCommand {
-            if case let .xmodemSend(url) = kind, case let typed = TransferKind.typeable(url.lastPathComponent),
-               typed != url.lastPathComponent {
-                logger?.note("\(url.lastPathComponent) typed as \(typed): a terminal line can't carry all its characters")
-            }
-            logger?.log(.tx, Data(command.utf8))
-            typeCommand(command, wait: false)
-        }
     }
 
-    private func makeTransfer(_ kind: TransferKind, primed: Data?, settings s: Settings) throws -> FileTransfer {
+    private func makeTransfer(_ kind: TransferKind, primed: Data?, startRemote: Bool, settings s: Settings) -> FileTransfer {
+        let traceURL = s.traceDirectory?.appendingPathComponent(ZmodemTrace.defaultFileName(protocolName: kind.protocolName))
         switch kind {
         case .zmodemReceive, .zmodemSend:
-            if s.useExternalZmodem {
-                return try ExternalTransfer(kind: kind, workingDirectory: s.downloadDirectory)
-            }
-            let traceURL = s.traceDirectory?.appendingPathComponent(ZmodemTrace.defaultFileName())
             let z = ZmodemTransfer(kind: kind, directory: s.downloadDirectory, options: s.zmodemOptions, traceURL: traceURL,
                                    receiveCommand: s.zmodemReceiveCommand)
             if let primed { z.prime(primed) }
             return z
         default:
-            return try ExternalTransfer(kind: kind, workingDirectory: s.downloadDirectory, xmodem1K: s.xmodem1K)
+            return XmodemTransfer(kind: kind, directory: s.downloadDirectory, xmodem1K: s.xmodem1K,
+                                  receiveCommand: startRemote ? kind.remoteReceiveCommand : nil,
+                                  traceLevel: s.zmodemOptions.traceLevel, traceURL: traceURL)
         }
     }
 
@@ -393,7 +378,7 @@ public final class Session: @unchecked Sendable {
 
     public func cancelTransfer() {
         let active: FileTransfer? = lock.withLock {
-            if let t = transfer as? ExternalTransfer, t.kind.isBlockProtocol {
+            if let t = transfer, t.kind.isBlockProtocol {
                 // X/YMODEM receivers only see CAN at a block boundary; one that got the abort
                 // mid-block treats it as a bad block and NAKs. Watch for that and abort again.
                 cancelWatchUntil = Uptime.now + 15
@@ -429,7 +414,7 @@ public final class Session: @unchecked Sendable {
 
     /// Tell a waiting remote `rz` to give up.
     public func abortRemoteTransfer() {
-        port.write(Data(repeating: 0x18, count: 8) + Data(repeating: 0x08, count: 8))
+        port.write(TransferKind.abortSequence)
     }
 
     public struct TransferInProgress: Error, CustomStringConvertible {
@@ -509,7 +494,7 @@ public final class Session: @unchecked Sendable {
         }
         if again {
             lock.withLock { logger }?.note("Remote still receiving after cancel (NAK); aborting again")
-            port.write(ExternalTransfer.abortSequence)
+            port.write(TransferKind.abortSequence)
         }
     }
 

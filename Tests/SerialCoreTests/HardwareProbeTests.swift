@@ -172,7 +172,7 @@ struct HardwareRawThroughputTests {
     }
 }
 
-/// XMODEM against a real device's lrzsz, through SerialTerm's lrzsz runner. Runs only when
+/// XMODEM and YMODEM against a real device's lrzsz, with the built-in engines. Runs only when
 /// SERIALTERM_PROBE_PORT and SERIALTERM_PROBE_XMODEM are set; the device shell should be in a scratch dir.
 @Suite(.serialized, .enabled(if: ProcessInfo.processInfo.environment["SERIALTERM_PROBE_XMODEM"] != nil))
 struct HardwareXmodemTests {

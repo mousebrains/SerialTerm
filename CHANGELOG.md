@@ -33,8 +33,10 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
   and serial read timing around each bad subpacket.
 - ZMODEM workarounds: block size, forced ACK window, force CRC-16, escape all control characters,
   timeout.
-- XMODEM / YMODEM through lrzsz: sends type the device's `rx`/`rb`; XMODEM receive starts when
-  lrzsz's `sx` announces itself; optional lrzsz ZMODEM.
+- Native XMODEM (CRC-16 or checksum, 128- or 1024-byte blocks) and YMODEM (batches with names,
+  sizes and modification times): sends type the device's `rx`/`rb`; XMODEM receive starts when
+  lrzsz's `sx` announces itself; protocol traces like ZMODEM's; YMODEM files get the same safe names
+  as ZMODEM's, and an XMODEM receive replaces the chosen file only once it has all arrived.
 - Tests: codec, native↔native over corrupting links, interop with lrzsz over ptys (clean and
   noisy), traces, performance, and opt-in tests against real hardware.
 - CI on GitHub Actions; tagged releases.
@@ -43,6 +45,9 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
 - Licensed GPL-3.0-or-later.
 
 ### Changed
+- XMODEM and YMODEM, which ran through lrzsz during development, are built in, so lrzsz is no
+  longer needed on the Mac (the tests still use it as the remote side). The setting to run ZMODEM
+  through lrzsz is gone. Transfer ▸ Open Last ZMODEM Trace is now Open Last Transfer Trace.
 - Requires macOS 15 or later (was 14).
 - Builds with only the Command Line Tools; Xcode is optional. (A clean build of the tests with only
   the Command Line Tools sometimes fails with "plugin for module 'TestingMacros' not found", a
@@ -64,18 +69,13 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
     failure is now reported and nothing is typed.
   - A baud rate the driver refused left the line at 9600 with the new framing; the previous
     settings are now restored.
-  - lrzsz ZMODEM sends had no back-pressure: on a slow line the whole file queued up, `lsz` timed
-    out after about a minute, and Cancel waited behind the file. `lsz` is now held back as a tty
-    would hold it, Cancel discards queued output, and a program that ignores SIGTERM is killed.
   - After a ZMODEM rewind or abort, the rest of the chunk being written kept going out, and waits
     for the line to drain could block forever under flow control. Both now stop.
   - Paced typing: Cancel left the echo wait running (the next key waited out the timeout and "No
     echo" appeared); the echo is now only looked for at the start of the device's reply; and the
     `rb`/`rx` commands typed for X/YMODEM sends now go at the typing pace.
   - Remote file names in session-log notes weren't escaped, so a name could forge a log line.
-  - lrzsz receives kept names such as `.profile`; files are now saved under the built-in
-    receiver's safe names. An XMODEM file name starting with `-` was read as an option by
-    `lrx`/`rx`, and lrzsz messages kept embedded line breaks.
+  - An XMODEM file name starting with `-` was read as an option by the device's `rx`.
   - A remote that kept starting and aborting transfers restarted one many times a second;
     automatic starts now pause for 30 s after three quick failures.
   - Data races on the session's settings (found with Thread Sanitizer) and the trace's counters,

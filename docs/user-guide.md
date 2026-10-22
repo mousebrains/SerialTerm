@@ -116,7 +116,7 @@ Above about 1 Mbaud, use RTS/CTS flow control if the device supports it.
 | Baud menu | Common rates, or Custom… |
 | Presets menu | Apply, save or delete a [preset](#presets) |
 | ⚡ Connect / Disconnect | ⇧⌘K |
-| Transfer menu | ZMODEM / YMODEM / XMODEM send and receive (while connected and no transfer is running), Cancel Transfer, Open Last ZMODEM Trace, Show Download Folder |
+| Transfer menu | ZMODEM / YMODEM / XMODEM send and receive (while connected and no transfer is running), Cancel Transfer, Open Last Transfer Trace, Show Download Folder |
 | ● Log | Turn session logging on or off: red while this window is logging, grey while logging is on but the window isn't connected, ⚠ when logging is on but the window couldn't open its log |
 | Line menu | Send Break, Send Window Size (stty), Clear Screen |
 | Slider | Data bits, parity, stop bits, flow control, Backspace key, typing pace, ZMODEM receive command; **More Settings…** |
@@ -162,10 +162,10 @@ Open with **SerialTerm ▸ Settings…** (⌘,). These settings apply to all win
 - *Start transfers automatically*: ZMODEM when the remote runs `sz`/`rz`, and XMODEM when lrzsz's
   `sx` announces itself. If three automatic transfers fail within 30 seconds, automatic starts
   pause for 30 seconds, so a device stuck starting and aborting transfers can't restart one
-  many times a second. *Use lrzsz instead of the built-in ZMODEM*; files it receives are saved
-  under the same safe names as the built-in receiver's (no paths, no leading dots, never
-  overwriting).
-- *ZMODEM diagnostics* and *ZMODEM workarounds*: see [ZMODEM & Diagnostics](zmodem.md).
+  many times a second.
+- *Diagnostics* (a protocol trace for every transfer) and *ZMODEM workarounds*: see
+  [ZMODEM & Diagnostics](zmodem.md).
+- *XMODEM: send 1K blocks*: see [YMODEM and XMODEM](#ymodem-and-xmodem).
 
 **Presets**: rename, reorder or delete [presets](#presets), and change or clear each one's port.
 A name that is empty or already used by another preset isn't taken; the field says why.
@@ -247,16 +247,15 @@ Disconnecting during a transfer cancels it and tells the device to stop first. I
 unplugged during a transfer, the status bar keeps the reason for the disconnect and says the
 transfer was stopped.
 **Results** appear in the status bar when the transfer ends, for example `Received 3 files
-(183 MB)`. A failure of a built-in ZMODEM transfer that wrote a trace points you to **Open Last
-ZMODEM Trace**. SerialTerm beeps when a transfer you started fails, not for automatic ones.
+(183 MB)`. A failed transfer that wrote a trace points you to **Open Last Transfer Trace**. SerialTerm beeps when a transfer you started fails, not for automatic ones.
 
 If automatic start is off, choose **Transfer ▸ ZMODEM ▸ Receive** before running `sz`.
 
-### YMODEM and XMODEM (via lrzsz)
+### YMODEM and XMODEM
 
-These need `brew install lrzsz` on the Mac and lrzsz (`sx`/`rx`/`sb`/`rb`) on the device. Start
-sends from SerialTerm while the device is at its shell prompt; SerialTerm types the device's
-receive command for you.
+These are built in. On the device they work with lrzsz (`sx`/`rx`/`sb`/`rb`) or any other XMODEM
+or YMODEM program. Start sends from SerialTerm while the device is at its shell prompt;
+SerialTerm types the device's receive command for you.
 
 | | Do this | What happens |
 |---|---|---|
@@ -275,8 +274,15 @@ to ZMODEM, which SerialTerm then receives automatically. So running `sb` and doi
 gets your files.
 
 XMODEM sends neither a file name nor a size, so you choose the name, and the file arrives padded
-with 0x1A bytes to a multiple of 128. YMODEM sends both, so its files arrive exact. To strip the
-padding from a text file: `perl -pi -e 's/\x1a+$//' file`.
+with 0x1A bytes to a multiple of 128. YMODEM sends both, so its files arrive exact, under safe
+names that never overwrite an existing file, like ZMODEM's. To strip the padding from a text
+file: `perl -pi -e 's/\x1a+$//' file`. An XMODEM receive replaces the file you chose only once
+it has all arrived; a failed one leaves it as it was.
+
+SerialTerm uses CRC-16 when the device's receiver asks for it ('C') and the original checksum
+when it asks with a NAK. lrzsz's `rx` asks for the checksum unless given `-c`. When receiving,
+SerialTerm asks for CRC-16, and after three requests (9 s) without an answer, for the checksum;
+the first block shows which the device chose.
 
 **XMODEM-1K** (Settings ▸ Transfers) sends 1024-byte blocks instead of 128, which is fewer round
 trips and was about 1.5× faster to a MicroRider. Leave it off for devices that only accept classic
@@ -310,9 +316,9 @@ after it closes; the next program to open it sets its own.
 **Errors at high speed.** Turn on RTS/CTS if both ends support it. For ZMODEM, see the workarounds
 in [ZMODEM & Diagnostics](zmodem.md).
 
-**A ZMODEM transfer failed or behaved oddly.** Choose **Transfer ▸ Open Last ZMODEM Trace**. The
-[ZMODEM guide](zmodem.md#reading-a-trace) explains how to read it. Trying again with the lrzsz
-setting on helps tell a device quirk from a SerialTerm bug.
+**A transfer failed or behaved oddly.** Choose **Transfer ▸ Open Last Transfer Trace**. The
+[ZMODEM guide](zmodem.md#reading-a-trace) explains how to read it, for
+[XMODEM and YMODEM](zmodem.md#xmodem-and-ymodem-traces) too.
 
 **Settings were reset to defaults.** If SerialTerm can't read its saved settings (damaged, or
 written by a newer version), it starts with defaults and keeps the old data in its preferences
