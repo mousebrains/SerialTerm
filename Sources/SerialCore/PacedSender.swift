@@ -69,14 +69,18 @@ final class PacedSender: @unchecked Sendable {
     private var previous: UInt8 = 0
     private var lastReport = Date.distantPast
     /// While waiting for an echo: what satisfies it, the pause to take after it, the timeout that
-    /// sends the next character anyway, and how many bytes have arrived since the character went.
-    private var awaiting: (echo: Echo, gap: Double, timeout: DispatchWorkItem, seen: Int)?
+    /// sends the next character anyway, how many bytes have arrived since the character went, and
+    /// how far into them the echo may be.
+    private var awaiting: (echo: Echo, gap: Double, timeout: DispatchWorkItem, seen: Int, window: Int)?
     private var echoMissing = false
     /// Bumped by `cancel`; a pump or timeout scheduled before it does nothing.
     private var generation = 0
     /// An echo comes back first, perhaps after a short escape sequence; the same character
     /// further on is output, not an echo.
     static let echoWindow = 32
+    /// After a line end, the device's answer to the line (its output, then the next prompt, often
+    /// with colours and a path) can come before the echo of the next character.
+    static let lineEchoWindow = 1024
 
     private static let cr: UInt8 = 0x0D, lf: UInt8 = 0x0A
 
@@ -119,7 +123,7 @@ final class PacedSender: @unchecked Sendable {
     func received(_ data: Data) {
         let next: (gap: Double, generation: Int)? = lock.withLock {
             guard var a = awaiting else { return nil }
-            let window = data.prefix(max(0, Self.echoWindow - a.seen))
+            let window = data.prefix(max(0, a.window - a.seen))
             guard a.echo.isSatisfied(by: a.echo == .anything ? data : window) else {
                 a.seen += data.count
                 awaiting = a
@@ -154,7 +158,7 @@ final class PacedSender: @unchecked Sendable {
     /// Send the next byte (or, with no per-character pacing, everything up to the next line end),
     /// then come back after the pause it calls for, or once it is echoed. Stops when nothing is left.
     private func pump(_ scheduled: Int) {
-        let next: (chunk: Data, gap: Double, echo: Echo?, left: Int, missing: Bool)? = lock.withLock {
+        let next: (chunk: Data, gap: Double, echo: Echo?, window: Int, left: Int, missing: Bool)? = lock.withLock {
             guard scheduled == generation else { return nil }
             guard head < pending.count else {
                 running = false
@@ -165,6 +169,7 @@ final class PacedSender: @unchecked Sendable {
             let p = _pacing
             let perCharacter = p.charactersPerSecond > 0 || p.waitForEcho
             let start = head
+            let afterLineEnd = previous == Self.cr || previous == Self.lf
             var lineEnd = false
             repeat {
                 let b = pending[head]
@@ -179,14 +184,15 @@ final class PacedSender: @unchecked Sendable {
             }
             var gap = p.charactersPerSecond > 0 ? 1 / Double(p.charactersPerSecond) : 0
             if lineEnd { gap += p.lineDelay }
-            return (chunk, gap, p.waitForEcho ? Echo(for: chunk.last!) : nil, pending.count - head, echoMissing)
+            return (chunk, gap, p.waitForEcho ? Echo(for: chunk.last!) : nil,
+                    afterLineEnd ? Self.lineEchoWindow : Self.echoWindow, pending.count - head, echoMissing)
         }
         guard let next else { return }
 
         if let echo = next.echo {
             // Arm before writing, so a fast echo can't arrive first and be missed.
             let timeout = DispatchWorkItem { [weak self] in self?.echoTimedOut(scheduled) }
-            lock.withLock { awaiting = (echo, next.gap, timeout, 0) }
+            lock.withLock { awaiting = (echo, next.gap, timeout, 0, next.window) }
             queue.asyncAfter(deadline: .now() + max(pacing.echoTimeout, 0.01), execute: timeout)
         }
         output?(next.chunk)

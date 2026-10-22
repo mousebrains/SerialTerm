@@ -121,6 +121,34 @@ struct PacingTests {
         #expect(!r.missing)
     }
 
+    /// After a line end the device answers the line (output, then its prompt) before it echoes
+    /// the next character; that echo used to be missed when the answer was over 32 bytes.
+    @Test func echoAfterTheNextPrompt() {
+        let sender = PacedSender()
+        sender.pacing = Pacing(waitForEcho: true, echoTimeout: 0.5)
+        let pending = Inbox<(Int, Bool)>()
+        let device = DispatchQueue(label: "device")
+        let answer = Data(("file1  file2  file3.txt\r\n"
+            + "\u{1B}[01;32muser@host\u{1B}[00m:\u{1B}[01;34m~/data/2026-10-21/cast_017\u{1B}[00m$ ").utf8)
+        sender.output = { [weak sender] data in
+            device.async {
+                switch data {
+                case Data("\r".utf8): sender?.received(Data("\r\n".utf8))
+                case Data("b".utf8): sender?.received(answer + data)  // the prompt arrives after "b" went
+                default: sender?.received(data)
+                }
+            }
+        }
+        sender.onPending = { pending.add(($0, $1)) }
+        let start = Date()
+        sender.send(Data("a\rb".utf8))
+        let deadline = Date().addingTimeInterval(3)
+        repeat { usleep(10_000) } while sender.isBusy && Date() < deadline
+        #expect(answer.count > PacedSender.echoWindow * 2)
+        #expect(Date().timeIntervalSince(start) < 0.4, "waited for the echo timeout")
+        #expect(!pending.all.contains { $0.1 }, "reported a missing echo")
+    }
+
     @Test func carriesOnWithoutEcho() {
         let r = runWithEcho("abc", delay: 0.01, silent: ["b"], timeout: 0.2)
         #expect(r.chunks.map(\.bytes) == ["a", "b", "c"])
