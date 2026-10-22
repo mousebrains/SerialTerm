@@ -66,6 +66,7 @@ public final class SerialPort: @unchecked Sendable {
     private let readQueue = DispatchQueue(label: "SerialPort.read", qos: .userInteractive)
     private let writeQueue = DispatchQueue(label: "SerialPort.write", qos: .userInitiated)
     private var closeError: Error?
+    private var _adapterReport: [String] = []
     /// Bytes queued by `write` but not yet accepted by the driver.
     private let pendingCondition = NSCondition()
     private var pendingBytes = 0
@@ -87,11 +88,16 @@ public final class SerialPort: @unchecked Sendable {
         lock.withLock { fd >= 0 }
     }
 
+    /// The adapter and driver behind the port, and whether the driver took the request for a short
+    /// receive latency, as found when the port opened. For traces and logs; empty until then.
+    public var adapterReport: [String] { lock.withLock { _adapterReport } }
+
     public func open() throws {
         // O_CLOEXEC: a program the app starts mustn't inherit the port (and keep the device busy).
         let fd = posixOpen(path, O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC)
         guard fd >= 0 else { throw SerialError.open(path: path, errno: errno) }
 
+        var report = PortDescription.lookUp(path: path)?.lines ?? ["adapter: not listed by IOKit"]
         do {
             #if os(macOS)
             // Refuse other opens of the device while we hold it.
@@ -99,8 +105,12 @@ public final class SerialPort: @unchecked Sendable {
             #endif
             try Self.apply(config, to: fd)
             #if os(macOS)
+            // Drivers that buffer received bytes may hold a partial packet until this much time
+            // passes. Not every driver supports it, and one that accepts it may still not apply it.
             var latencyMicroseconds: UInt = 1000
-            _ = ioctl(fd, IOSSDATALAT_, &latencyMicroseconds)
+            let latency = ioctl(fd, IOSSDATALAT_, &latencyMicroseconds) == 0
+                ? "accepted" : "refused (\(String(cString: strerror(errno))))"
+            report.append("receive latency: asked the driver for 1 ms (IOSSDATALAT): \(latency)")
             #endif
             tcflush(fd, TCIOFLUSH)
         } catch {
@@ -108,7 +118,10 @@ public final class SerialPort: @unchecked Sendable {
             throw error
         }
 
-        lock.withLock { self.fd = fd }
+        lock.withLock {
+            self.fd = fd
+            _adapterReport = report
+        }
 
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: readQueue)
         source.setEventHandler { [weak self] in self?.drainInput() }

@@ -153,6 +153,22 @@ Choose the level in Settings ▸ Transfers ▸ Diagnostics:
 Each line starts with the local time and the seconds since the transfer started, then the
 direction: `RX` (from the remote), `TX` (to the remote), or `--` (a note).
 
+Every trace begins with notes on the connection:
+
+- **`port:`**: the device and its line settings.
+- **`adapter:`**: the USB product and vendor names, VID:PID, chip revision (`bcdDevice`), serial
+  number and USB speed.
+- **`driver:`**: the macOS driver serving the port. A DriverKit driver shows as
+  `IOUserSerial (its class), its bundle`.
+- **`receive latency:`**: whether that driver accepted SerialTerm's request to pass on received
+  bytes within 1 ms (`IOSSDATALAT`). Accepting it doesn't guarantee that the driver applies it.
+- **`host:`**: the macOS version.
+
+Adapters differ in how long they hold the last partial USB packet of a burst. That shows in a
+transfer's timing wherever the sender stops to wait for a reply: one FTDI FT232R cable held it
+for about 230 ms. The session log gets the same notes when a port is opened, or when recording
+starts on a port that is already open.
+
 ## Reading a trace
 
 A clean receive:
