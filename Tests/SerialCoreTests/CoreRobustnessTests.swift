@@ -150,6 +150,24 @@ struct SerialPortRobustnessTests {
         #expect(got < 200_000, "\(got) bytes still went out after the discard")
     }
 
+    /// The port's descriptor used to be inherited by programs the app starts (the lrzsz runner).
+    @Test func descriptorIsNotInherited() throws {
+        let pty = try PtyPair()
+        func descriptors() -> Set<Int32> {
+            Set((0..<min(getdtablesize(), 4096)).filter { fd in
+                var path = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+                return fcntl(fd, F_GETPATH, &path) == 0 && String(cString: path) == pty.slavePath
+            })
+        }
+        let before = descriptors()
+        let port = SerialPort(path: pty.slavePath, config: SerialConfig())
+        try port.open()
+        defer { port.close() }
+        let opened = descriptors().subtracting(before)
+        #expect(opened.count == 1)
+        for fd in opened { #expect(fcntl(fd, F_GETFD) & FD_CLOEXEC != 0) }
+    }
+
     /// Waits on a line that isn't moving (flow control holding it) can time out or be stopped.
     @Test func waitsCanTimeOutOrStop() throws {
         let pty = try PtyPair()

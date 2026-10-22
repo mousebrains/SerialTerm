@@ -88,7 +88,8 @@ public final class SerialPort: @unchecked Sendable {
     }
 
     public func open() throws {
-        let fd = posixOpen(path, O_RDWR | O_NOCTTY | O_NONBLOCK)
+        // O_CLOEXEC: a program the app starts mustn't inherit the port (and keep the device busy).
+        let fd = posixOpen(path, O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC)
         guard fd >= 0 else { throw SerialError.open(path: path, errno: errno) }
 
         do {
