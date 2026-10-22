@@ -47,6 +47,37 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
 - Builds and tests with only the Command Line Tools; Xcode is optional.
 
 ### Fixed
+- Found in an adversarial review ([#4](https://github.com/mousebrains/SerialTerm/issues/4)), core:
+  - The app crashed if a session log or ZMODEM trace couldn't be written (disk full, volume
+    removed): Foundation's `FileHandle.write` raises an exception. The log or trace now stops and
+    the status bar says so.
+  - Two windows starting logs in the same second shared one file and overwrote each other's
+    lines, and traces started in the same second replaced each other. Each now gets its own file
+    (`-2`, `-3`, …); an existing file is never replaced.
+  - Disconnecting or switching ports mid-transfer left both ends running: the abort never reached
+    the device, and the transfer (or an lrzsz program) carried on. The transfer is now cancelled
+    and the device told to stop before the port closes.
+  - A transfer that failed to start (a missing download folder, say) left the window showing a
+    transfer in progress, with a Cancel that did nothing, after typing `rb`/`rx` to the device. The
+    failure is now reported and nothing is typed.
+  - A baud rate the driver refused left the line at 9600 with the new framing; the previous
+    settings are now restored.
+  - lrzsz ZMODEM sends had no back-pressure: on a slow line the whole file queued up, `lsz` timed
+    out after about a minute, and Cancel waited behind the file. `lsz` is now held back as a tty
+    would hold it, Cancel discards queued output, and a program that ignores SIGTERM is killed.
+  - After a ZMODEM rewind or abort, the rest of the chunk being written kept going out, and waits
+    for the line to drain could block forever under flow control. Both now stop.
+  - Paced typing: Cancel left the echo wait running (the next key waited out the timeout and "No
+    echo" appeared); the echo is now only looked for at the start of the device's reply; and the
+    `rb`/`rx` commands typed for X/YMODEM sends now go at the typing pace.
+  - Remote file names in session-log notes weren't escaped, so a name could forge a log line.
+  - lrzsz receives kept names such as `.profile`; files are now saved under the built-in
+    receiver's safe names. An XMODEM file name starting with `-` was read as an option by
+    `lrx`/`rx`, and lrzsz messages kept embedded line breaks.
+  - A remote that kept starting and aborting transfers restarted one many times a second;
+    automatic starts now pause for 30 s after three quick failures.
+  - Data races on the session's settings (found with Thread Sanitizer) and the trace's counters,
+    and a race that could send serial I/O to a reused descriptor number after a close.
 - ZMODEM send could stall for a minute and fail when the receiver lost data, asked for a resend,
   lost data again and went quiet (as Slocum gliders do at 921600 baud). After a ZEOF gets no
   reply the sender now resends from the last position the receiver confirmed, which makes the

@@ -36,6 +36,9 @@ public final class ZmodemTransfer: FileTransfer, @unchecked Sendable {
         } else {
             trace = nil
         }
+        trace?.onFailure = { [weak self] error in
+            self?.onLog?("ZMODEM trace stopped: \(error.localizedDescription)")
+        }
     }
 
     /// Bytes received before the transfer started (the remote's opening frame when auto-started).

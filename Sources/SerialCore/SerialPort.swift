@@ -46,9 +46,12 @@ private let termiosBaudRates: Set<Int> = [
 
 /// A raw serial port. Reads arrive on a private queue via `onData`; writes are queued
 /// and performed in order on a separate queue so a slow line never blocks the caller.
+///
+/// The descriptor is only used while holding `lock` (see `withFD`), and `close` gives it up under
+/// the same lock, so no call can reach a descriptor number that has been closed and reused.
 public final class SerialPort: @unchecked Sendable {
     public let path: String
-    public private(set) var config: SerialConfig
+    public var config: SerialConfig { lock.withLock { _config } }
 
     /// Called on the port's read queue with each chunk received.
     public var onData: ((Data) -> Void)?
@@ -58,6 +61,7 @@ public final class SerialPort: @unchecked Sendable {
 
     private let lock = NSLock()
     private var fd: Int32 = -1
+    private var _config: SerialConfig
     private var readSource: DispatchSourceRead?
     private let readQueue = DispatchQueue(label: "SerialPort.read", qos: .userInteractive)
     private let writeQueue = DispatchQueue(label: "SerialPort.write", qos: .userInitiated)
@@ -67,10 +71,12 @@ public final class SerialPort: @unchecked Sendable {
     private var pendingBytes = 0
     /// Bumped by `discardPendingWrites`; queued writes from an older generation are skipped.
     private var writeGeneration = 0
+    /// Reused for every read (read queue only).
+    private var readBuffer = [UInt8](repeating: 0, count: 65_536)
 
     public init(path: String, config: SerialConfig) {
         self.path = path
-        self.config = config
+        _config = config
     }
 
     deinit {
@@ -115,12 +121,19 @@ public final class SerialPort: @unchecked Sendable {
         source.resume()
     }
 
-    /// Change line settings on an open port.
+    /// Change line settings on an open port. If the driver refuses them, the old settings are
+    /// put back (a refused custom rate would otherwise leave the line at the 9600 placeholder).
     public func reconfigure(_ newConfig: SerialConfig) throws {
-        let fd = lock.withLock { self.fd }
-        guard fd >= 0 else { throw SerialError.notOpen }
-        try Self.apply(newConfig, to: fd)
-        config = newConfig
+        try lock.withLock {
+            guard fd >= 0 else { throw SerialError.notOpen }
+            do {
+                try Self.apply(newConfig, to: fd)
+            } catch {
+                try? Self.apply(_config, to: fd)
+                throw error
+            }
+            _config = newConfig
+        }
     }
 
     public func close() {
@@ -148,9 +161,7 @@ public final class SerialPort: @unchecked Sendable {
         }
         writeQueue.async { [weak self] in
             guard let self else { return }
-            if self.pendingCondition.withLock({ self.writeGeneration == generation }) {
-                self.writeAll(data)
-            }
+            self.writeAll(data, generation: generation)
             self.pendingCondition.withLock {
                 self.pendingBytes -= data.count
                 self.pendingCondition.broadcast()
@@ -160,33 +171,48 @@ public final class SerialPort: @unchecked Sendable {
 
     /// Block until everything queued with `write` has been handed to the driver.
     public func waitForPendingWrites() {
-        writeQueue.sync {}
+        waitForPendingWrites(maxPending: 0)
     }
 
-    /// Drop output that is queued but not yet sent: writes still waiting here, and whatever the
-    /// driver hasn't transmitted (TCOFLUSH). Used when a protocol rewinds and that data is stale.
+    /// Drop output that is queued but not yet sent: writes still waiting here, the rest of the
+    /// one being written, and whatever the driver hasn't transmitted (TCOFLUSH). Used when a
+    /// protocol rewinds or aborts and that data is stale.
     public func discardPendingWrites() {
         pendingCondition.withLock { writeGeneration += 1 }
-        let fd = lock.withLock { self.fd }
-        if fd >= 0 { tcflush(fd, TCOFLUSH) }
+        withFD { _ = tcflush($0, TCOFLUSH) }
     }
 
-    /// Block until at most `maxPending` queued bytes remain (0 = all written). Senders use a
+    /// Blocks until at most `maxPending` queued bytes remain (0 = all written). Senders use a
     /// non-zero limit to keep the driver busy without queueing unbounded data.
-    public func waitForPendingWrites(maxPending: Int) {
-        if maxPending <= 0 { return waitForPendingWrites() }
+    ///
+    /// Also returns when the port closes, when `timeout` passes, or when `stop` returns true
+    /// (checked about every 0.1 s), so flow control holding the line can't block a cancel forever.
+    /// Returns whether the backlog got down to `maxPending`.
+    @discardableResult
+    public func waitForPendingWrites(maxPending: Int, timeout: TimeInterval? = nil, until stop: (() -> Bool)? = nil) -> Bool {
+        let deadline = timeout.map { Date().addingTimeInterval($0) }
         pendingCondition.lock()
-        while pendingBytes > maxPending && isOpen {
-            _ = pendingCondition.wait(until: Date().addingTimeInterval(0.25))
+        defer { pendingCondition.unlock() }
+        while pendingBytes > max(0, maxPending) {
+            guard isOpen else { return false }
+            if let deadline, Date() >= deadline { return false }
+            if let stop {
+                // Not under our lock: the check may take the caller's own locks.
+                pendingCondition.unlock()
+                let stopped = stop()
+                pendingCondition.lock()
+                if stopped { return false }
+            }
+            var wake = Date().addingTimeInterval(0.1)
+            if let deadline { wake = min(wake, deadline) }
+            _ = pendingCondition.wait(until: wake)
         }
-        pendingCondition.unlock()
+        return true
     }
 
     public func sendBreak() {
         writeQueue.async { [weak self] in
-            guard let self else { return }
-            let fd = self.lock.withLock { self.fd }
-            if fd >= 0 { tcsendbreak(fd, 0) }
+            self?.withFD { _ = tcsendbreak($0, 0) }
         }
     }
 
@@ -195,24 +221,35 @@ public final class SerialPort: @unchecked Sendable {
 
     // MARK: - Private
 
+    /// Runs `body` with the open descriptor while holding `lock`, so `close` can't give it up
+    /// meanwhile. `body` must not block for long or take `lock`.
+    @discardableResult
+    private func withFD<T>(_ body: (Int32) throws -> T) rethrows -> T? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard fd >= 0 else { return nil }
+        return try body(fd)
+    }
+
     private func setModemBit(_ bit: Int32, _ on: Bool) {
         #if os(macOS)
-        let fd = lock.withLock { self.fd }
-        guard fd >= 0 else { return }
-        var bits = bit
-        _ = ioctl(fd, on ? TIOCMBIS_ : TIOCMBIC_, &bits)
+        withFD { fd in
+            var bits = bit
+            _ = ioctl(fd, on ? TIOCMBIS_ : TIOCMBIC_, &bits)
+        }
         #endif
     }
 
+    /// Runs on the read queue, as does the cancel handler that closes the descriptor, so the
+    /// descriptor stays valid here without holding the lock.
     private func drainInput() {
         let fd = lock.withLock { self.fd }
         guard fd >= 0 else { return }
-        var buffer = [UInt8](repeating: 0, count: 65_536)
         while true {
-            let n = buffer.withUnsafeMutableBytes { posixRead(fd, $0.baseAddress, $0.count) }
+            let n = readBuffer.withUnsafeMutableBytes { posixRead(fd, $0.baseAddress, $0.count) }
             if n > 0 {
-                onData?(Data(buffer[0..<n]))
-                if n < buffer.count { return }
+                onData?(Data(readBuffer[0..<n]))
+                if n < readBuffer.count { return }
             } else if n == 0 {
                 close(error: SerialError.open(path: path, errno: ENXIO))
                 return
@@ -226,17 +263,26 @@ public final class SerialPort: @unchecked Sendable {
         }
     }
 
-    private func writeAll(_ data: Data) {
+    /// Writes `data`, stopping early if it is discarded meanwhile (a protocol rewind or abort),
+    /// so stale data doesn't keep going out after `discardPendingWrites`.
+    private func writeAll(_ data: Data, generation: Int) {
         data.withUnsafeBytes { raw in
             var offset = 0
             while offset < raw.count {
-                let fd = lock.withLock { self.fd }
-                guard fd >= 0 else { return }
-                let n = posixWrite(fd, raw.baseAddress! + offset, raw.count - offset)
-                if n > 0 {
-                    offset += n
-                } else if n < 0 && (errno == EAGAIN || errno == EINTR) {
-                    // Output buffer full (or flow control holding us off); wait for room.
+                guard pendingCondition.withLock({ writeGeneration == generation }) else { return }
+                // O_NONBLOCK: write never blocks, so it's fine under the lock.
+                let result: (n: Int, error: Int32)? = withFD { fd in
+                    let n = posixWrite(fd, raw.baseAddress! + offset, raw.count - offset)
+                    return (n, n < 0 ? errno : 0)
+                }
+                guard let result else { return }  // closed
+                if result.n > 0 {
+                    offset += result.n
+                } else if result.n < 0 && (result.error == EAGAIN || result.error == EINTR) {
+                    // Output buffer full (or flow control holding us off); wait for room, without
+                    // the lock. At worst poll waits on a number reused meanwhile, which is harmless.
+                    let fd = lock.withLock { self.fd }
+                    guard fd >= 0 else { return }
                     var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
                     _ = poll(&pfd, 1, 250)
                 } else {
