@@ -172,6 +172,12 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
   - Smaller: the serial port's descriptor is no longer inherited by programs the app starts;
     write and command waits use a clock that doesn't jump; on very slow lines (below ~440 baud)
     the sender waits longer for the rest of a back-channel header.
+- Review (#9), app:
+  - Auto-reconnect could switch a window from a device without a USB serial number to another
+    device, with one, plugged in where it was (CDC devices are named after the USB socket).
+  - Closing a window didn't disconnect it, so its log missed the closing lines.
+  - The port scanner didn't free its IOKit notifications when released (latent: the app keeps
+    one for its lifetime).
 - ZMODEM send could stall for a minute and fail when the receiver lost data, asked for a resend,
   lost data again and went quiet (as Slocum gliders do at 921600 baud). After a ZEOF gets no
   reply the sender now resends from the last position the receiver confirmed, which makes the
