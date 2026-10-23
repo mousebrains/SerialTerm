@@ -18,6 +18,8 @@ public struct PortDescription: Equatable, Sendable {
     public var productID: Int?
     /// bcdDevice: the chip's revision, e.g. 0x0600 for an FT232R.
     public var deviceRelease: Int?
+    /// The USB interface the port belongs to: one per port of a multi-port adapter.
+    public var usbInterfaceNumber: Int?
     /// IOUSBLib's numbering: 0 low, 1 full, 2 high, 3 super, 4 super+.
     public var usbSpeed: Int?
     /// The IOKit class serving the port (the serial client's provider), e.g. AppleUSBFTDI. A
@@ -28,18 +30,24 @@ public struct PortDescription: Equatable, Sendable {
     public var driverBundle: String?
 
     public init(usbVendor: String? = nil, usbProduct: String? = nil, usbSerialNumber: String? = nil,
-                vendorID: Int? = nil, productID: Int? = nil, deviceRelease: Int? = nil, usbSpeed: Int? = nil,
-                driverClass: String? = nil, userClass: String? = nil, driverBundle: String? = nil) {
+                vendorID: Int? = nil, productID: Int? = nil, deviceRelease: Int? = nil, usbInterfaceNumber: Int? = nil,
+                usbSpeed: Int? = nil, driverClass: String? = nil, userClass: String? = nil, driverBundle: String? = nil) {
         self.usbVendor = usbVendor
         self.usbProduct = usbProduct
         self.usbSerialNumber = usbSerialNumber
         self.vendorID = vendorID
         self.productID = productID
         self.deviceRelease = deviceRelease
+        self.usbInterfaceNumber = usbInterfaceNumber
         self.usbSpeed = usbSpeed
         self.driverClass = driverClass
         self.userClass = userClass
         self.driverBundle = driverBundle
+    }
+
+    /// An FTDI chip: FTDI's vendor ID, or a driver for FTDI chips (some products have their own IDs).
+    public var isFTDI: Bool {
+        vendorID == 0x0403 || [driverClass, userClass].contains { $0?.contains("FTDI") == true }
     }
 
     /// "adapter: …" and "driver: …" lines for a trace or log.
@@ -76,6 +84,15 @@ public struct PortDescription: Equatable, Sendable {
     /// (a pseudo-terminal, for one).
     public static func lookUp(path: String) -> PortDescription? {
         #if canImport(IOKit)
+        return withSerialService(path: path) { describe($0) }
+        #else
+        return nil
+        #endif
+    }
+
+    #if canImport(IOKit)
+    /// Runs `body` with the serial client IOKit lists for `path`, if any.
+    static func withSerialService<T>(path: String, _ body: (io_object_t) -> T) -> T? {
         let matching = IOServiceMatching(kIOSerialBSDServiceValue) as NSMutableDictionary
         matching[kIOSerialBSDTypeKey] = kIOSerialBSDAllTypes
         var iterator: io_iterator_t = 0
@@ -86,13 +103,11 @@ public struct PortDescription: Equatable, Sendable {
         while case let service = IOIteratorNext(iterator), service != 0 {
             defer { IOObjectRelease(service) }
             let names = [kIOCalloutDeviceKey, kIODialinDeviceKey].compactMap { property(service, $0) as? String }
-            if names.contains(path) { return describe(service) }
+            if names.contains(path) { return body(service) }
         }
-        #endif
         return nil
     }
 
-    #if canImport(IOKit)
     private static func property(_ entry: io_registry_entry_t, _ key: String) -> Any? {
         IORegistryEntryCreateCFProperty(entry, key as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue()
     }
@@ -110,6 +125,7 @@ public struct PortDescription: Equatable, Sendable {
             vendorID: (ancestor("idVendor") as? NSNumber)?.intValue,
             productID: (ancestor("idProduct") as? NSNumber)?.intValue,
             deviceRelease: (ancestor("bcdDevice") as? NSNumber)?.intValue,
+            usbInterfaceNumber: (ancestor("bInterfaceNumber") as? NSNumber)?.intValue,
             usbSpeed: (ancestor("Device Speed") as? NSNumber)?.intValue
         )
         var driver: io_registry_entry_t = 0

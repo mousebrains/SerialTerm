@@ -32,7 +32,7 @@ public enum SerialError: Error, CustomStringConvertible {
 // From <IOKit/serial/ioss.h> and <sys/ttycom.h>; Swift does not import these function-like macros.
 private let TIOCEXCL_: UInt = 0x2000_740D
 private let IOSSIOSPEED_: UInt = 0x8008_5402
-/// Receive latency in microseconds. Honoured by some drivers; best effort.
+/// Receive latency, defined in microseconds (but see `SerialPort.idleReceiveLatency`).
 private let IOSSDATALAT_: UInt = 0x8008_5400
 private let TIOCMBIS_: UInt = 0x8004_746C
 private let TIOCMBIC_: UInt = 0x8004_746B
@@ -67,6 +67,8 @@ public final class SerialPort: @unchecked Sendable {
     private let writeQueue = DispatchQueue(label: "SerialPort.write", qos: .userInitiated)
     private var closeError: Error?
     private var _adapterReport: [String] = []
+    private var adapter: PortDescription?
+    private var _receiveLatency: UInt?
     /// Bytes queued by `write` but not yet accepted by the driver.
     private let pendingCondition = NSCondition()
     private var pendingBytes = 0
@@ -74,6 +76,15 @@ public final class SerialPort: @unchecked Sendable {
     private var writeGeneration = 0
     /// Reused for every read (read queue only).
     private var readBuffer = [UInt8](repeating: 0, count: 65_536)
+
+    /// Receive latency asked of the driver (`IOSSDATALAT`): this much while idle, `transferReceiveLatency`
+    /// during a transfer, where every reply waited for counts. The request is defined in microseconds,
+    /// but Apple's FTDI driver writes the value's low byte to the chip's latency timer as milliseconds
+    /// (the 1000 SerialTerm used to ask for became 232 ms, holding every reply that long), so these are
+    /// that timer's milliseconds. 16 is FTDI's own default, and costs the driver ~0.6% of a core while
+    /// idle against ~4.6% at 1. To a driver that reads microseconds both mean no added latency.
+    public static let idleReceiveLatency: UInt = 16
+    public static let transferReceiveLatency: UInt = 1
 
     public init(path: String, config: SerialConfig) {
         self.path = path
@@ -92,26 +103,32 @@ public final class SerialPort: @unchecked Sendable {
     /// receive latency, as found when the port opened. For traces and logs; empty until then.
     public var adapterReport: [String] { lock.withLock { _adapterReport } }
 
+    /// The receive latency last asked of the driver (whether or not it took it).
+    public var receiveLatency: UInt? { lock.withLock { _receiveLatency } }
+
+    /// Asks the driver for receive latency `value` (see `idleReceiveLatency`). Returns lines for
+    /// traces and logs: whether the driver took it and, for an FTDI adapter, what its timer reads.
+    @discardableResult
+    public func setReceiveLatency(_ value: UInt) -> [String] {
+        guard let line = withFD({ Self.requestReceiveLatency(value, fd: $0) }) else { return [] }
+        lock.withLock { _receiveLatency = value }
+        return [line] + ftdiTimerReport()
+    }
+
     public func open() throws {
         // O_CLOEXEC: a program the app starts mustn't inherit the port (and keep the device busy).
         let fd = posixOpen(path, O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC)
         guard fd >= 0 else { throw SerialError.open(path: path, errno: errno) }
 
-        var report = PortDescription.lookUp(path: path)?.lines ?? ["adapter: not listed by IOKit"]
+        let adapter = PortDescription.lookUp(path: path)
+        var report = adapter?.lines ?? ["adapter: not listed by IOKit"]
         do {
             #if os(macOS)
             // Refuse other opens of the device while we hold it.
             _ = ioctl(fd, TIOCEXCL_)
             #endif
             try Self.apply(config, to: fd)
-            #if os(macOS)
-            // Drivers that buffer received bytes may hold a partial packet until this much time
-            // passes. Not every driver supports it, and one that accepts it may still not apply it.
-            var latencyMicroseconds: UInt = 1000
-            let latency = ioctl(fd, IOSSDATALAT_, &latencyMicroseconds) == 0
-                ? "accepted" : "refused (\(String(cString: strerror(errno))))"
-            report.append("receive latency: asked the driver for 1 ms (IOSSDATALAT): \(latency)")
-            #endif
+            report.append(Self.requestReceiveLatency(Self.idleReceiveLatency, fd: fd))
             tcflush(fd, TCIOFLUSH)
         } catch {
             _ = posixClose(fd)
@@ -120,8 +137,11 @@ public final class SerialPort: @unchecked Sendable {
 
         lock.withLock {
             self.fd = fd
-            _adapterReport = report
+            self.adapter = adapter
+            _receiveLatency = Self.idleReceiveLatency
         }
+        report += ftdiTimerReport()
+        lock.withLock { _adapterReport = report }
 
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: readQueue)
         source.setEventHandler { [weak self] in self?.drainInput() }
@@ -243,6 +263,22 @@ public final class SerialPort: @unchecked Sendable {
         defer { lock.unlock() }
         guard fd >= 0 else { return nil }
         return try body(fd)
+    }
+
+    private static func requestReceiveLatency(_ value: UInt, fd: Int32) -> String {
+        #if os(macOS)
+        var requested = value
+        let result = ioctl(fd, IOSSDATALAT_, &requested) == 0 ? "accepted" : "refused (\(String(cString: strerror(errno))))"
+        return "receive latency: asked the driver for \(value) (IOSSDATALAT): \(result)"
+        #else
+        return "receive latency: not supported here"
+        #endif
+    }
+
+    /// What an FTDI adapter's latency timer reads, which shows what a latency request really did.
+    private func ftdiTimerReport() -> [String] {
+        guard let adapter = lock.withLock({ self.adapter }), adapter.isFTDI else { return [] }
+        return [FTDILatency.report(FTDILatency.read(path: path, interface: adapter.usbInterfaceNumber))]
     }
 
     private func setModemBit(_ bit: Int32, _ on: Bool) {

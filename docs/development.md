@@ -83,6 +83,9 @@ SERIALTERM_PROBE_PORT=$PORT SERIALTERM_PROBE_RAW=1 \
 
 # Built-in XMODEM/YMODEM in all four directions with the device's lrzsz, MD5-checked over the line
 SERIALTERM_PROBE_PORT=$PORT SERIALTERM_PROBE_XMODEM=1 swift test --filter HardwareXmodemTests
+
+# FTDI adapters on Apple's driver: the latency requests set the chip's timer (no device needed on the line)
+SERIALTERM_PROBE_PORT=$PORT SERIALTERM_PROBE_FTDI=1 swift test --filter HardwareFTDILatencyTests
 ```
 
 The device's shell should be at a prompt in a scratch directory. The raw test writes and then
