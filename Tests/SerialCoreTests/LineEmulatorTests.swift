@@ -10,54 +10,73 @@ import Testing
 /// own, and keeps what it reads with the time it came.
 final class LineEnd: @unchecked Sendable {
     let fd: Int32
-    private let lock = NSLock()
-    private var chunks: [(time: TimeInterval, bytes: [UInt8])] = []
-    private var stopped = false
-    private let done = DispatchSemaphore(value: 0)
-    private var started: TimeInterval?
+    /// What the threads share. They hold this rather than the LineEnd, so that it can go away and
+    /// stop them: a thread holding the LineEnd kept it, and once the line closed, spun on the
+    /// hangup for the rest of the test run.
+    private final class State: @unchecked Sendable {
+        let lock = NSLock()
+        var chunks: [(time: TimeInterval, bytes: [UInt8])] = []
+        var stopped = false
+        var started: TimeInterval?
+        var isStopped: Bool { lock.withLock { stopped } }
+    }
+    private let state = State()
+    private let threads = DispatchGroup()
 
     init(_ path: String) throws {
         fd = open(path, O_RDWR | O_NOCTTY | O_NONBLOCK)
         guard fd >= 0 else { throw POSIXError(.ENOENT) }
-        Thread { [self] in
+        let fd = fd, state = state, threads = threads
+        threads.enter()
+        Thread {
+            defer { threads.leave() }
             var buf = [UInt8](repeating: 0, count: 65_536)
-            while !lock.withLock({ stopped }) {
+            while !state.isStopped {
                 var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
                 guard poll(&pfd, 1, 50) > 0 else { continue }
                 let n = read(fd, &buf, buf.count)
-                if n > 0 { lock.withLock { chunks.append((Uptime.now, Array(buf[0..<n]))) } }
+                if n > 0 {
+                    state.lock.withLock { state.chunks.append((Uptime.now, Array(buf[0..<n]))) }
+                } else if n == 0 || (errno != EAGAIN && errno != EINTR) {
+                    return  // the line has gone
+                }
             }
-            done.signal()
         }.start()
     }
 
     deinit {
-        lock.withLock { stopped = true }
-        done.wait()
+        state.lock.withLock { state.stopped = true }
+        threads.wait()
         close(fd)
     }
 
     /// Writes all of `bytes`, as fast as the line takes them, from a thread of its own: GCD's
     /// global queue can take seconds to start a block while many tests start at once.
     func send(_ bytes: [UInt8]) {
-        let fd = fd
-        Thread { [self] in
-            lock.withLock { started = Uptime.now }
+        let fd = fd, state = state, threads = threads
+        threads.enter()
+        Thread {
+            defer { threads.leave() }
+            state.lock.withLock { state.started = Uptime.now }
             var off = 0
-            while off < bytes.count {
+            while off < bytes.count && !state.isStopped {
                 let n = bytes[off...].withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
-                if n > 0 { off += n } else {
+                if n > 0 {
+                    off += n
+                } else if n < 0 && errno != EAGAIN && errno != EINTR {
+                    return
+                } else {
                     var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
-                    if poll(&pfd, 1, 100) < 0 { return }
+                    _ = poll(&pfd, 1, 100)
                 }
             }
         }.start()
     }
 
-    var received: [UInt8] { lock.withLock { chunks.flatMap(\.bytes) } }
+    var received: [UInt8] { state.lock.withLock { state.chunks.flatMap(\.bytes) } }
     /// When the last `send` started writing.
-    var sendStarted: TimeInterval? { lock.withLock { started } }
-    var reads: [(time: TimeInterval, bytes: [UInt8])] { lock.withLock { chunks } }
+    var sendStarted: TimeInterval? { state.lock.withLock { state.started } }
+    var reads: [(time: TimeInterval, bytes: [UInt8])] { state.lock.withLock { state.chunks } }
 
     /// Waits until `count` bytes have come, or `timeout` passes.
     @discardableResult
@@ -75,7 +94,7 @@ final class LineEnd: @unchecked Sendable {
         let begin = Uptime.now
         let deadline = begin + timeout
         while Uptime.now < deadline {
-            let last = lock.withLock { chunks.last?.time } ?? begin
+            let last = state.lock.withLock { state.chunks.last?.time } ?? begin
             if Uptime.now - max(last, begin) >= quiet { return }
             usleep(10_000)
         }
