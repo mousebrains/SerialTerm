@@ -22,6 +22,7 @@ final class XmodemReceiver {
     /// The file being written, removed if the transfer fails part way, and its identity, so the
     /// removal can't hit a file that has replaced it meanwhile.
     private var partial: (url: URL, inode: UInt64)?
+    private let marks = QuarantineMarks()
     private let timeout: TimeInterval
     private let crcAttempts: Int
 
@@ -44,7 +45,10 @@ final class XmodemReceiver {
     private var eotQuiet: TimeInterval { min(0.5, timeout / 10) }
 
     func run() throws -> Result {
-        defer { removePartial() }
+        defer {
+            removePartial()
+            marks.wait()
+        }
         switch kind {
         case let .xmodemReceive(target): return try receiveXmodem(as: target)
         case .ymodemReceive: return try receiveYmodem()
@@ -70,12 +74,14 @@ final class XmodemReceiver {
         let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
         defer { try? handle.close() }
         track(temp, handle)
-        ZmodemReceiver.quarantine(temp)
+        marks.add(temp)
 
         let first = try ask("the XMODEM sender", checksumFallback: true)
         link.log("Receiving by XMODEM (\(crc ? "CRC-16" : "checksum")) → \(target.lastPathComponent)")
         let bytes = try receiveData(first: first, into: handle, shownAs: target.lastPathComponent, size: nil)
         try? handle.close()
+        // The mark goes by path.
+        marks.wait()
         guard rename(temp.path, target.path) == 0 else {
             throw ZmodemError.fileError("Cannot save \(target.lastPathComponent): \(String(cString: strerror(errno)))")
         }
@@ -128,7 +134,7 @@ final class XmodemReceiver {
             }
             defer { try? handle.close() }
             track(url, handle)
-            ZmodemReceiver.quarantine(url)
+            marks.add(url)
             send(X.ack, "ACK")
             link.log("Receiving \(shown)\(meta.size.map { " (\($0) bytes)" } ?? "") → \(url.lastPathComponent)")
 
@@ -405,6 +411,8 @@ final class XmodemReceiver {
     private func removePartial() {
         guard let p = partial else { return }
         partial = nil
+        // The mark goes by path: not on whatever might take the file's place.
+        marks.wait()
         // Only if the path is still the file we created.
         var st = stat()
         if lstat(p.url.path, &st) == 0, UInt64(st.st_ino) == p.inode {
