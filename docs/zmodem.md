@@ -160,14 +160,31 @@ Every trace begins with notes on the connection:
   number and USB speed.
 - **`driver:`**: the macOS driver serving the port. A DriverKit driver shows as
   `IOUserSerial (its class), its bundle`.
-- **`receive latency:`**: whether that driver accepted SerialTerm's request to pass on received
-  bytes within 1 ms (`IOSSDATALAT`). Accepting it doesn't guarantee that the driver applies it.
+- **`receive latency:`**: the receive latency SerialTerm asked of the driver while idle
+  (`IOSSDATALAT`, 16), and whether the driver accepted it.
+- **`FTDI latency timer:`** (FTDI adapters only): what the chip's timer reads.
+- **`for the transfer, …`**: the same two, after switching to the transfer's latency (1).
 - **`host:`**: the macOS version.
 
+The session log gets the same notes when a port is opened, or when recording starts on a port that
+is already open.
+
+### Receive latency and FTDI adapters
+
 Adapters differ in how long they hold the last partial USB packet of a burst. That shows in a
-transfer's timing wherever the sender stops to wait for a reply: one FTDI FT232R cable held it
-for about 230 ms. The session log gets the same notes when a port is opened, or when recording
-starts on a port that is already open.
+transfer's timing wherever the sender stops to wait for a reply.
+
+- **What the FTDI timer does:** an FTDI chip sends a partial packet when its latency timer runs out.
+  FTDI's default is 16 ms.
+- **How Apple's driver sets it:** Apple's FTDI driver (`AppleUSBFTDI`) sets the timer from
+  `IOSSDATALAT`. The request is defined in microseconds, but the driver writes the value's low byte
+  as milliseconds: 1000 becomes 232, 16 becomes 16, 1 becomes 1.
+- **What that cost:** SerialTerm used to ask for 1000 (meaning 1 ms). That held every reply for
+  about 230 ms, adding ~0.48 s per file to a pull from a Slocum glider.
+- **What SerialTerm asks for now:** 16 while idle, which is FTDI's default and costs the driver
+  ~0.6% of a core, and 1 during a transfer. At 1 the driver would take ~4.6% of a core even with the
+  line idle.
+- **Other drivers:** those values mean 16 µs and 1 µs, so no added latency either way.
 
 ## Reading a trace
 

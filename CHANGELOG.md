@@ -37,6 +37,17 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
   - Adapter: product and vendor, VID:PID, chip revision, serial number and USB speed.
   - Why: adapters differ in how long they hold a partial USB packet, and that shows in transfer
     timing.
+- FTDI adapters no longer hold every reply for ~230 ms.
+  - Cause: SerialTerm asked the driver for 1000 µs of receive latency (`IOSSDATALAT`). Apple's FTDI
+    driver writes the low byte of that value to the chip's latency timer as milliseconds, so it
+    became 232 ms.
+  - Now: SerialTerm asks for 16 while idle (FTDI's default) and 1 during a transfer. The trace
+    header records both requests and what the chip's timer reads.
+  - Effect with a Slocum glider at 921,600: ~0.48 s less between files on a pull (a 10-file batch
+    took 73.7 s instead of 78.0 s), and 19 KB/s instead of 4.4 KB/s when sending with an ACK every
+    1 KB.
+  - Idle cost: 16 rather than 1 keeps the FTDI driver at ~0.6% of a core while connected, not
+    ~4.6%.
 - ZMODEM workarounds: block size, forced ACK window, force CRC-16, escape all control characters,
   timeout.
 - Native XMODEM (CRC-16 or checksum, 128- or 1024-byte blocks) and YMODEM (batches with names,

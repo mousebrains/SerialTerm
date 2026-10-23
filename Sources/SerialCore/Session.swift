@@ -149,10 +149,11 @@ public final class Session: @unchecked Sendable {
         for line in port.adapterReport { logger?.note(line) }
     }
 
-    /// The first lines of every transfer trace: the line, the adapter and driver behind it, and
-    /// the host, since all of them show in a transfer's timing.
-    private func traceHeader() -> [String] {
+    /// The first lines of every transfer trace: the line, the adapter and driver behind it, the
+    /// receive latency set for the transfer, and the host, since all of them show in its timing.
+    private func traceHeader(transferLatency: [String]) -> [String] {
         ["port: \(port.path) \(port.config.summary)"] + port.adapterReport
+            + transferLatency.map { "for the transfer, \($0)" }
             + ["host: macOS \(ProcessInfo.processInfo.operatingSystemVersionString)"]
     }
 
@@ -312,6 +313,7 @@ public final class Session: @unchecked Sendable {
                 return (self.logger, self.cancelRequested)
             }
             logger?.note("\(kind.displayName): \(message)")
+            self.port.setReceiveLatency(SerialPort.idleReceiveLatency)
             // A cancel isn't the remote's doing, so it doesn't count either way.
             if automatic && !cancelled { self.automaticResult(success: success) }
             self.onEvent?(.transferFinished(success: success, message: message))
@@ -339,6 +341,7 @@ public final class Session: @unchecked Sendable {
                 detector.reset()
             }
             logger?.note("\(kind.displayName) could not start: \(error)")
+            port.setReceiveLatency(SerialPort.idleReceiveLatency)
             if automatic { automaticResult(success: false) }
             onEvent?(.transferFinished(success: false, message: "\(error)"))
             throw TransferStartFailed(underlying: error)
@@ -347,18 +350,21 @@ public final class Session: @unchecked Sendable {
 
     private func makeTransfer(_ kind: TransferKind, primed: Data?, startRemote: Bool, settings s: Settings) -> FileTransfer {
         let traceURL = s.traceDirectory?.appendingPathComponent(ZmodemTrace.defaultFileName(protocolName: kind.protocolName))
+        // Every reply a transfer waits for counts, so it runs at the low receive latency; `onFinish`
+        // and a failed start put the idle one back (see `SerialPort.idleReceiveLatency`).
+        let latency = port.setReceiveLatency(SerialPort.transferReceiveLatency)
         switch kind {
         case .zmodemReceive, .zmodemSend:
             let z = ZmodemTransfer(kind: kind, directory: s.downloadDirectory, options: s.zmodemOptions, traceURL: traceURL,
                                    receiveCommand: s.zmodemReceiveCommand)
-            traceHeader().forEach { z.trace?.note($0) }
+            for line in traceHeader(transferLatency: latency) { z.trace?.note(line) }
             if let primed { z.prime(primed) }
             return z
         default:
             let x = XmodemTransfer(kind: kind, directory: s.downloadDirectory, xmodem1K: s.xmodem1K,
                                    receiveCommand: startRemote ? kind.remoteReceiveCommand : nil,
                                    traceLevel: s.zmodemOptions.traceLevel, traceURL: traceURL)
-            traceHeader().forEach { x.trace?.note($0) }
+            for line in traceHeader(transferLatency: latency) { x.trace?.note(line) }
             return x
         }
     }
