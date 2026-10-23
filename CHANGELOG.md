@@ -73,6 +73,16 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
   toolchain problem; building again finishes it.)
 
 ### Fixed
+- ZMODEM send could livelock with lrzsz's `rz` after a resend's `ZDATA` header was lost. Seen once
+  on CI (PR #17).
+  - The receiver kept asking for the same offset, and the sender ignored those repeats as
+    duplicates. It then waited a full 10 s for an answer to `ZEOF` before resending.
+  - lrzsz's timeout is also 10 s, so each resend crossed the receiver's next `ZRPOS` (after which
+    it skips input) and was lost the same way, until it gave up.
+  - Now, without an answer within the duplicate window (≥ 2 s from the last repeat), the sender
+    resends.
+  - Test: `recoversWhenTheResendsHeaderIsLost` drops the resend's header on the way to `lrz`. It
+    took 10.4 s before (at least one full timeout) and 2.5 s after.
 - Found in an adversarial review ([#4](https://github.com/mousebrains/SerialTerm/issues/4)), core:
   - The app crashed if a session log or ZMODEM trace couldn't be written (disk full, volume
     removed): Foundation's `FileHandle.write` raises an exception. The log or trace now stops and

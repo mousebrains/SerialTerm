@@ -147,7 +147,7 @@ struct ZmodemEndToEndTests {
         private let source: DispatchSourceRead
 
         init(_ tool: URL, _ args: [String], in dir: URL, pty: PtyPair,
-             fromRemote: Mangler? = nil, toRemote: Mangler? = nil) throws {
+             fromRemote: (any LineFilter)? = nil, toRemote: (any LineFilter)? = nil) throws {
             process.executableURL = tool
             process.arguments = args
             process.currentDirectoryURL = dir
@@ -204,7 +204,7 @@ struct ZmodemEndToEndTests {
     }
 
     func runRemote(_ names: [String], _ args: [String], in dir: URL, pty: PtyPair,
-                   fromRemote: Mangler? = nil, toRemote: Mangler? = nil) throws -> RemoteProgram {
+                   fromRemote: (any LineFilter)? = nil, toRemote: (any LineFilter)? = nil) throws -> RemoteProgram {
         signal(SIGPIPE, SIG_IGN)
         return try RemoteProgram(try #require(Lrzsz.find(names)), args, in: dir, pty: pty,
                                  fromRemote: fromRemote, toRemote: toRemote)
@@ -431,6 +431,52 @@ struct ZmodemEndToEndTests {
         } else {
             #expect(trace.contains("RX ZRPOS") && trace.contains("Resending noisy"))
         }
+    }
+
+    /// lrz loses the ZDATA header of the first resend, so it keeps asking for the same position,
+    /// which looks like the duplicates it sends while skipping data still in flight. On CI this once
+    /// livelocked: each 10 s wait for an answer to ZEOF fell into step with lrz's own 10 s timeout, and
+    /// every resend crossed lrz's next ZRPOS (after which it skips input, losing the resend's header).
+    /// The sender must conclude well within one timeout that the requests were genuine.
+    @Test func recoversWhenTheResendsHeaderIsLost() throws {
+        let pty = try PtyPair()
+        let src = try tempDir(), dst = try tempDir()
+        var rng = SystemRandomNumberGenerator()
+        let file = src.appendingPathComponent("lost-header.bin")
+        try Data((0..<300_000).map { _ in UInt8.random(in: 0...255, using: &rng) }).write(to: file)
+        var e = ZEncoder()
+        let zdata = Array(e.binaryHeader(ZHeader(.data, position: 0), crc32: true).prefix(4))
+        // An error early on makes lrz ask for a resend; the resend's header (the 2nd ZDATA) is lost.
+        let line = FilterChain(Mangler(flipAt: [30_000]), HeaderDropper(zdata, occurrence: 2, length: 12))
+
+        let session = Session(port: SerialPort(path: pty.slavePath, config: SerialConfig()), downloadDirectory: src)
+        session.traceDirectory = try tempDir()
+        let events = Inbox<SessionEvent>()
+        let started = Inbox<TimeInterval>()
+        session.onEvent = { event in
+            events.add(event)
+            if case .remoteWaitingForFiles = event {
+                started.add(Uptime.now)
+                try? session.startTransfer(.zmodemSend([file]))
+            }
+        }
+        try session.open()
+        defer { session.close() }
+        let remote = try runRemote(["lrz", "rz"], ["-b"], in: dst, pty: pty, toRemote: line)
+        defer { remote.stop() }
+
+        let finished = events.wait(timeout: 60) { $0.contains { if case .transferFinished = $0 { true } else { false } } }
+        let elapsed = Uptime.now - (started.all.first ?? Uptime.now)
+        #expect(finished)
+        let trace = (try? String(contentsOf: try #require(session.lastTraceURL), encoding: .utf8)) ?? ""
+        for case let .transferFinished(success, message) in events.all {
+            #expect(success, "\(message)")
+            if !success { print("=== ZMODEM trace (lost resend header) ===\n" + trace.split(separator: "\n").suffix(80).joined(separator: "\n")) }
+        }
+        #expect(trace.contains("Ignoring duplicate ZRPOS"), "the scenario didn't happen")
+        #expect(elapsed < 8, "took \(elapsed) s: waited out a whole 10 s timeout")
+        remote.process.waitUntilExit()
+        #expect(try Data(contentsOf: dst.appendingPathComponent(file.lastPathComponent)) == Data(contentsOf: file))
     }
 
     @Test func remoteSendsMultipleFilesAutoReceive() throws {

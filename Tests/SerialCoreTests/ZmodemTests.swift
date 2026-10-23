@@ -126,8 +126,20 @@ struct ZmodemCodecTests {
     }
 }
 
+/// Something that alters the bytes going one way on a test line.
+protocol LineFilter: AnyObject, Sendable {
+    func apply(_ data: Data) -> Data
+}
+
+/// Applies filters in turn.
+final class FilterChain: LineFilter, @unchecked Sendable {
+    private let filters: [any LineFilter]
+    init(_ filters: any LineFilter...) { self.filters = filters }
+    func apply(_ data: Data) -> Data { filters.reduce(data) { $1.apply($0) } }
+}
+
 /// Drops or flips bytes at chosen offsets of a stream, to exercise error recovery.
-final class Mangler: @unchecked Sendable {
+final class Mangler: LineFilter, @unchecked Sendable {
     private let lock = NSLock()
     private var seen = 0
     private var flips: Set<Int>
@@ -156,7 +168,7 @@ final class Mangler: @unchecked Sendable {
 
 /// Flips the byte `distance` bytes after the nth occurrence of a byte pattern, e.g. to damage
 /// the first subpacket after a rewind's ZDATA header.
-final class PatternMangler: @unchecked Sendable {
+final class PatternMangler: LineFilter, @unchecked Sendable {
     private let lock = NSLock()
     private let pattern: [UInt8]
     private let occurrence: Int
@@ -194,7 +206,7 @@ final class PatternMangler: @unchecked Sendable {
 
 /// Removes the nth occurrence of a header (its first bytes given by `pattern`) and the
 /// `length - pattern.count` bytes after it, e.g. to lose one ZRPOS on the back channel.
-final class HeaderDropper: @unchecked Sendable {
+final class HeaderDropper: LineFilter, @unchecked Sendable {
     private let lock = NSLock()
     private let pattern: [UInt8]
     private let occurrence: Int
