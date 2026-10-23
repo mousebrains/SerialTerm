@@ -126,8 +126,20 @@ struct ZmodemCodecTests {
     }
 }
 
+/// Something that alters the bytes going one way on a test line.
+protocol LineFilter: AnyObject, Sendable {
+    func apply(_ data: Data) -> Data
+}
+
+/// Applies filters in turn.
+final class FilterChain: LineFilter, @unchecked Sendable {
+    private let filters: [any LineFilter]
+    init(_ filters: any LineFilter...) { self.filters = filters }
+    func apply(_ data: Data) -> Data { filters.reduce(data) { $1.apply($0) } }
+}
+
 /// Drops or flips bytes at chosen offsets of a stream, to exercise error recovery.
-final class Mangler: @unchecked Sendable {
+final class Mangler: LineFilter, @unchecked Sendable {
     private let lock = NSLock()
     private var seen = 0
     private var flips: Set<Int>
@@ -156,7 +168,7 @@ final class Mangler: @unchecked Sendable {
 
 /// Flips the byte `distance` bytes after the nth occurrence of a byte pattern, e.g. to damage
 /// the first subpacket after a rewind's ZDATA header.
-final class PatternMangler: @unchecked Sendable {
+final class PatternMangler: LineFilter, @unchecked Sendable {
     private let lock = NSLock()
     private let pattern: [UInt8]
     private let occurrence: Int
@@ -194,7 +206,7 @@ final class PatternMangler: @unchecked Sendable {
 
 /// Removes the nth occurrence of a header (its first bytes given by `pattern`) and the
 /// `length - pattern.count` bytes after it, e.g. to lose one ZRPOS on the back channel.
-final class HeaderDropper: @unchecked Sendable {
+final class HeaderDropper: LineFilter, @unchecked Sendable {
     private let lock = NSLock()
     private let pattern: [UInt8]
     private let occurrence: Int
@@ -224,6 +236,34 @@ final class HeaderDropper: @unchecked Sendable {
                         dropping = length - pattern.count
                     }
                 }
+            }
+            return out
+        }
+    }
+}
+
+/// Damages every subpacket longer than `limit` bytes on the line, as a receiver with a fixed
+/// buffer does (a Slocum glider takes at most 1024 data bytes, about 1060 on the line).
+final class OversizeSubpacketBreaker: LineFilter, @unchecked Sendable {
+    private let lock = NSLock()
+    private let limit: Int
+    private var run = 0
+    private var afterZDLE = false
+
+    init(limit: Int) { self.limit = limit }
+
+    func apply(_ data: Data) -> Data {
+        lock.withLock {
+            var out = Data(data)
+            for i in out.indices {
+                let b = out[i]
+                if afterZDLE && (0x68...0x6b).contains(b) {
+                    run = 0  // ZDLE ZCRCE/G/Q/W ends a subpacket
+                } else {
+                    run += 1
+                    if run == limit { out[i] = b ^ 0x55 }
+                }
+                afterZDLE = !afterZDLE && b == 0x18
             }
             return out
         }
@@ -463,6 +503,36 @@ struct ZmodemNativeTransferTests {
         #expect(logs.all.contains { $0.contains("resending from the last confirmed position") }, "the scenario didn't happen: \(logs.all)")
         #expect(results.all.allSatisfy { $0.0 }, "\(results.all)")
         try expectSame(files, in: dst)
+    }
+
+    /// A receiver that can't take subpackets longer than 1024 bytes (a Slocum glider) only ever asks
+    /// for the same position again. A sender set to bigger blocks has to fall back to 1024.
+    @Test(arguments: [2048, 8192])
+    func fallsBackToStandardBlocksWhenBigOnesAreRejected(blockSize: Int) throws {
+        let src = try tempDir(), dst = try tempDir()
+        let files = try makeFiles(in: src, sizes: [50_000, 20_000])
+        var senderOptions = ZmodemOptions(), receiverOptions = ZmodemOptions()
+        senderOptions.timeout = 0.3
+        senderOptions.blockSize = blockSize
+        receiverOptions.timeout = 30
+        let sender = ZmodemTransfer(kind: .zmodemSend(files), directory: dst, options: senderOptions)
+        let receiver = ZmodemTransfer(kind: .zmodemReceive, directory: dst, options: receiverOptions)
+        let smallBuffer = OversizeSubpacketBreaker(limit: 1_100)
+        sender.onOutput = { receiver.feed(smallBuffer.apply($0)) }
+        receiver.onOutput = { sender.feed($0) }
+        let logs = Inbox<String>()
+        sender.onLog = { logs.add($0) }
+        let results = Inbox<(Bool, String)>()
+        sender.onFinish = { results.add(($0, $1)) }
+        receiver.onFinish = { results.add(($0, $1)) }
+        try receiver.start()
+        try sender.start()
+        #expect(results.wait(timeout: 60) { $0.count == 2 })
+        #expect(results.all.allSatisfy { $0.0 }, "\(results.all)")
+        try expectSame(files, in: dst)
+        #expect(logs.all.contains { $0.contains("1024-byte blocks") }, "\(logs.all.suffix(8))")
+        // Only the first file needed the fall back; the second starts with 1024-byte blocks.
+        #expect(logs.all.filter { $0.contains("1024-byte blocks") }.count == 1)
     }
 
     /// The glider at 921600 does that over and over: each burst overruns it and it goes quiet

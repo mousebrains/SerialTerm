@@ -105,8 +105,19 @@ drops any output not yet written and restarts from the requested offset.
 lrzsz's receiver repeats `ZRPOS` while it skips the data that was in flight, so the sender
 ignores a repeat of the offset it restarted from within the last 2 s (longer on slow lines,
 where the data in flight takes longer to drain). A quick repeat can also be genuine, when the
-data right after the restart was damaged too. Then the receiver ignores the sender's `ZEOF`,
-because it doesn't have the data yet, and the sender, seeing no reply, restarts from that offset.
+data right after the restart was damaged too, or the restart's `ZDATA` header was lost. Then the
+receiver ignores the sender's `ZEOF`, because it doesn't have the data yet. If no answer comes
+within that same 2 s (from the last repeat), the sender takes the repeats as genuine and restarts
+from that offset.
+
+It doesn't wait out the whole timeout: lrzsz's own timeout is also 10 s. Waiting the full 10 s
+fell into step with it, so every restart crossed the receiver's next `ZRPOS`, which it follows by
+skipping input. The restart's header was lost each time, and the transfer failed after three
+rounds.
+
+Blocks larger than ZMODEM's standard 1024 bytes need a receiver that takes them. One that doesn't
+(a Slocum glider) only asks for the same offset again. After two restarts in a row without
+progress, the sender falls back to 1024-byte blocks for the rest of the session.
 
 Some receivers (Slocum gliders at 921600 baud) go quiet after losing data, without asking for it
 again, or their request is lost. If `ZEOF` gets no reply, the sender resends from the last
@@ -273,7 +284,7 @@ setting is tested against lrzsz in both directions.
 
 | Setting | Default | Use when |
 |---|---|---|
-| Block size when sending | 1024 | The receiver mishandles 1 KB subpackets (try 512 or 256), or the link is very clean and fast (try 8192) |
+| Block size when sending | 1024 | The receiver mishandles 1 KB subpackets (try 512 or 256), or the link is very clean and fast (try 8192; the sender falls back to 1024 if the receiver keeps rejecting bigger blocks) |
 | Wait for ACK every | As receiver requests | The receiver advertises streaming but loses data when sent to continuously. Forces `ZCRCW` every N bytes |
 | Force CRC-16 | off | The peer advertises CRC-32 but gets it wrong |
 | Escape all control characters | off | Something on the link (a modem, a radio, a terminal server) swallows or changes control characters |
