@@ -55,13 +55,16 @@ final class ZmodemReceiver {
         // long, and what it sent is then shown after all.
         var timeouts = 0, noise = 0, echoes = 0, unproductive = 0
         var noiseSince: TimeInterval?
+        /// A ZDATA header has come: what follows up to the next header is a sender's data.
+        var resent = false
         defer { reader.deadline = nil }
         while true {
             reader.waitingFor = "a file from the sender"
             reader.deadline = noiseSince.map { $0 + timeout }
             let h: ZHeader?
             do {
-                h = try reader.readHeader(timeout: timeout, garbageLimit: 1024)
+                defer { resent = false }
+                h = try reader.readHeader(timeout: timeout, garbageLimit: resent ? 1 << 22 : 1024)
             } catch ZmodemError.timeout {
                 if let start = noiseSince, Uptime.now >= start + timeout {
                     throw ZmodemError.protocolError("No ZMODEM sender (only noise received)")
@@ -83,9 +86,16 @@ final class ZmodemReceiver {
             if unproductive > 40 { throw ZmodemError.protocolError("No file offered by the sender") }
 
             switch h.frame {
-            case .rqinit, .eof, .data:
+            case .rqinit, .eof:
                 // Sender (re)starting, or it missed our ZRINIT after the last file.
                 sendReceiverInit()
+            case .data:
+                // Data for a file we have: our answer to its ZEOF was late, and the sender went
+                // back to where we last confirmed. Answer again, and let the data go by up to the
+                // next header, as after a ZRPOS: it's a sender's, not noise.
+                link.trace?.note("data at \(h.position) for a file already received; skipping it")
+                sendReceiverInit()
+                resent = true
             case .rinit:
                 // That's what we send: the remote is echoing us (or is a receiver too). Answering
                 // would echo back and forth forever.
