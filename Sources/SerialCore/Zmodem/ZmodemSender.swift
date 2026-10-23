@@ -504,6 +504,13 @@ final class ZmodemSender {
             rewinds += 1
             link.log("Resending \(name) from \(p) (\(why)); was at \(pos)")
             if errors > 30 || rewinds > maxRewinds { throw ZmodemError.tooManyErrors("\(name): receiver kept rejecting data") }
+            // Blocks over ZMODEM's standard 1024 bytes need a receiver that takes them; one that
+            // doesn't (a Slocum glider) just asks for the same data again. One error can happen at
+            // any size, so fall back after the second in a row, for the rest of the session.
+            if errors >= 2 && blockSize > 1024 {
+                link.log("Receiver keeps rejecting \(blockSize)-byte blocks: sending 1024-byte blocks")
+                blockSize = 1024
+            }
             pos = p
             link.rewound(to: p)
         }

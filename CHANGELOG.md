@@ -37,6 +37,9 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
   - Adapter: product and vendor, VID:PID, chip revision, serial number and USB speed.
   - Why: adapters differ in how long they hold a partial USB packet, and that shows in transfer
     timing.
+- ZMODEM send: a block size above 1024 now falls back to 1024 when the receiver keeps rejecting
+  the data (two restarts in a row without progress). Previously the same block was resent until
+  the send failed: a Slocum glider takes at most 1024-byte subpackets.
 - FTDI adapters no longer hold every reply for ~230 ms.
   - Cause: SerialTerm asked the driver for 1000 µs of receive latency (`IOSSDATALAT`). Apple's FTDI
     driver writes the low byte of that value to the chip's latency timer as milliseconds, so it
