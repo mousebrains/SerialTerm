@@ -65,6 +65,7 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
 
 - XMODEM-1K option (Settings ▸ Transfers): 1024-byte blocks, ~1.5× faster to the MicroRider.
 - Licensed GPL-3.0-or-later.
+- App icon: a green-screen terminal reading SERIAL / TERM, with a `>_` prompt at the small sizes.
 
 ### Changed
 - XMODEM and YMODEM, which ran through lrzsz during development, are built in, so lrzsz is no

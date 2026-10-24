@@ -21,10 +21,14 @@ app itself always builds.
 ```sh
 open Package.swift                 # Xcode: scheme "SerialTerm"
 swift build                        # debug build
-swift run SerialTerm               # run without a bundle (fine for development)
+swift run SerialTerm               # run without a bundle (fine for development; no app icon)
 ./scripts/make-app.sh              # release build → build/SerialTerm.app (ad-hoc signed)
 VERSION=0.2.0 BUILD=7 ./scripts/make-app.sh
 ```
+
+The app icon, `assets/AppIcon.icns`, is drawn by `scripts/make-icon.swift`. After changing the
+drawing, run `swift scripts/make-icon.swift` and commit the new `.icns`; `make-app.sh` only
+copies it, so builds don't run the script.
 
 ## Testing
 
