@@ -131,7 +131,9 @@ Some receivers (Slocum gliders at 921600 baud) go quiet after losing data, witho
 again, or their request is lost. If `ZEOF` gets no reply, the sender resends from the last
 position the receiver confirmed (its last `ZRPOS` or `ZACK`; the `ZCRCQ` every 32 KB keeps that
 recent): a receiver waiting there takes the data, and one elsewhere answers with a `ZRPOS` giving
-its position. It does this up to three times in a row without progress. A `ZRINIT` that arrives
+its position. It does this up to three times in a row without progress. A `ZACK` confirming new
+data while it waits restarts the wait: the receiver is still taking in data that was on its way
+(in a modem's buffer, say). A `ZRINIT` that arrives
 late, after such a resend has started, is taken as the answer to `ZEOF`. A receiver that already
 has the whole file answers the resend with `ZRINIT` again and lets its data go by.
 

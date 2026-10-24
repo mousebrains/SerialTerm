@@ -496,14 +496,16 @@ final class ZmodemSender {
             return isDuplicate(p)
         }
 
-        /// The receiver reports having everything before `p`.
-        func confirm(_ p: Int) {
-            guard p <= file.count, p > confirmed else { return }
+        /// The receiver reports having everything before `p`. Returns whether that's new.
+        @discardableResult
+        func confirm(_ p: Int) -> Bool {
+            guard p <= file.count, p > confirmed else { return false }
             // It has answered data, so after every offer it saw.
             offerAnswersDue = 0
             confirmed = p
             prods = 0
             errors = 0
+            return true
         }
 
         func rewind(to p: Int, _ why: String) throws {
@@ -666,7 +668,7 @@ final class ZmodemSender {
                 // queued: at low baud rates the queue alone can take longer than the timeout.
                 link.waitForOutput()
                 try checkCancelled()
-                let deadline = Uptime.now + timeout
+                var deadline = Uptime.now + timeout
                 let waitStart = Uptime.now
                 while true {
                     // A receiver still waiting for data ignores ZEOF. If it's waiting at a position
@@ -713,8 +715,10 @@ final class ZmodemSender {
                             continue stream
                         }
                     case .ack:
-                        // A late answer to a ZCRCQ.
-                        confirm(h.position)
+                        // A late answer to a ZCRCQ. If it's new, the receiver is still taking in
+                        // data that was on its way (in a modem's buffer, say): wait for its answer
+                        // to ZEOF from now, rather than resend data it's about to have.
+                        if confirm(h.position) { deadline = Uptime.now + timeout }
                     case .skip:
                         return .skipped
                     case .abort, .ferr, .can:

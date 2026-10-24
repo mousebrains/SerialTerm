@@ -479,6 +479,26 @@ struct TransfersOverEmulatedLineTests {
         #expect(outcome.senderTrace.contains("Resending file0.bin from 0 (no reply to ZEOF"), "the scenario didn't happen")
     }
 
+    /// A modem with a large buffer (and flow control) in front of a slower line: when the sender has
+    /// handed over all its data and sent ZEOF, seconds of it are still in the modem. The receiver's
+    /// ZACKs show it taking that data in, and the sender keeps waiting for its answer to ZEOF,
+    /// rather than take the wait for a receiver gone quiet and resend.
+    @Test func zacksAfterZEOFKeepTheSenderWaiting() throws {
+        let src = try tempDir(), dst = try tempDir()
+        let size = 300_000
+        let files = try makeFiles(in: src, sizes: [size])
+        // 2.8 s of data in the buffer, a ZACK every 32 KB (0.7 s), and a 1.5 s timeout.
+        let modem = LineEmulator.Line(baud: 460_800, buffer: 131_072)
+        let line = try LineEmulator(aToB: modem, bToA: Self.cable)
+        let outcome = try zmodem(files, over: line, into: dst, sender: Self.options(timeout: 1.5))
+        try expectDelivered(files, to: dst, outcome)
+        let lines = outcome.senderTrace.split(separator: "\n")
+        let zeof = lines.firstIndex { $0.contains("TX ZEOF") } ?? lines.endIndex
+        #expect(lines[zeof...].filter { $0.contains("RX ZACK") }.count >= 2, "the scenario didn't happen")
+        let resends = lines.filter { $0.contains("Resending") }
+        #expect(resends.isEmpty, "\(resends)")
+    }
+
     /// lrz answers each offer it sees with a ZRPOS too, so its late answer is followed by stale ones.
     @Test(.enabled(if: Lrzsz.installed, "lrzsz not installed (brew install lrzsz)"))
     func aLateAnswerFromLrzIsntAnErrorReport() throws {
