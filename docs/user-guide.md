@@ -216,6 +216,10 @@ overwritten.
 
 ## File transfers
 
+While any transfer runs, SerialTerm tells macOS that work is going on: App Nap doesn't slow down a
+transfer in a background window, and the Mac doesn't go to sleep from inactivity in the middle of
+one (closing the lid still sleeps it).
+
 ### ZMODEM (built in)
 
 **Receiving**: run `sz file1 file2 …` on the device. SerialTerm detects it and receives all the
