@@ -23,6 +23,17 @@ final class XmodemReceiver {
     /// removal can't hit a file that has replaced it meanwhile.
     private var partial: (url: URL, inode: UInt64)?
     private let marks = QuarantineMarks()
+    /// Our requests (a 'C' or NAK, or an ACK, which asks for the next block) that no block has
+    /// answered yet, and how many repeats of the block accepted last will answer the rest.
+    /// A sender may take a request that reaches it after it has sent a block for a NAK, and send
+    /// that block again: lsb does, when two of our 'C's have queued up while it starts. Answering
+    /// such a repeat puts an ACK too many in flight, which the sender takes for its next block's
+    /// or its EOT's, and the two ends fall out of step ("got block 0, expected 2"). The sender
+    /// reads our requests in order, so those repeats all come before its next new block.
+    private var unanswered = 0
+    private var repeatsDue = 0
+    /// The last byte sent: a 'C' right after an ACK asks for the same block as the ACK.
+    private var lastSent: UInt8?
     private let timeout: TimeInterval
     private let crcAttempts: Int
 
@@ -110,6 +121,7 @@ final class XmodemReceiver {
                 }
                 throw ZmodemError.protocolError("The sender isn't using YMODEM (it sent data without a file name); try XMODEM")
             }
+            accepted()
             let meta = ZmodemReceiver.FileInfo(data)
             guard !meta.name.isEmpty else {
                 link.trace?.line(.rx, "  block 0: end of batch")
@@ -173,6 +185,7 @@ final class XmodemReceiver {
             switch incoming {
             case let .block(n, data) where n == expected:
                 eotSeen = false
+                accepted()
                 let keep = size.map { max(0, min(data.count, $0 - written)) } ?? data.count
                 do {
                     try handle.write(contentsOf: data.prefix(keep))
@@ -189,6 +202,12 @@ final class XmodemReceiver {
                 }
                 link.progress("Receiving", name, written, size)
                 send(X.ack, nil)
+            case let .block(n, _) where n == expected &- 1 && repeatsDue > 0:
+                // The answer to a request of ours that reached the sender after the block: it
+                // has our ACK, and is sending the next block (see `unanswered`).
+                eotSeen = false
+                repeatsDue -= 1
+                link.trace?.note("duplicate block \(n), answering an earlier request of ours; not acknowledging it again")
             case let .block(n, _) where n == expected &- 1:
                 // Our ACK was lost and the sender repeated the block.
                 eotSeen = false
@@ -312,11 +331,13 @@ final class XmodemReceiver {
             heard = true
             switch b {
             case X.soh, X.stx:
+                unanswered = max(0, unanswered - 1)
                 return try readBlock(size: b == X.stx ? 1024 : 128)
             case X.eot where skipped == 0 && cans == 0:
                 if (try? reader.byte(timeout: eotQuiet, quiet: true)) == nil {
                     try checkCancelled()
                     link.trace?.line(.rx, "  EOT")
+                    unanswered = max(0, unanswered - 1)
                     return .eot
                 }
                 reader.unread()  // more follows: look at it as usual
@@ -397,7 +418,15 @@ final class XmodemReceiver {
         if !bytes.isEmpty { link.trace?.note("purged \(bytes.count) bytes before the NAK") }
     }
 
+    /// A new block has checked out: the requests still unanswered will bring repeats of it.
+    private func accepted() {
+        repeatsDue = unanswered
+        unanswered = 0
+    }
+
     private func send(_ byte: UInt8, _ traced: String?) {
+        if byte == X.nak || byte == X.ack || (byte == X.crcRequest && lastSent != X.ack) { unanswered += 1 }
+        lastSent = byte
         if byte == X.nak { link.trace?.naksOut += 1 }
         if let traced { link.trace?.line(.tx, "  " + traced) }
         link.send([byte])

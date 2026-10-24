@@ -555,6 +555,42 @@ struct TransfersOverEmulatedLineTests {
         }
     }
 
+    /// lsb starts late (as under load), after the receiver has asked twice: both 'C's are waiting
+    /// for it. ("got block 0, expected 2" under load; issue #19.)
+    @Test(.enabled(if: Lrzsz.installed, "lrzsz not installed (brew install lrzsz)"))
+    func ymodemFromLsbStartingLate() throws {
+        let line = try LineEmulator(both: .init(baud: 1_000_000, latency: 0.05))
+        let src = try tempDir(), dst = try tempDir()
+        let files = try makeFiles(in: src, sizes: [8, 1_000])
+        let session = Session(port: SerialPort(path: line.a.slavePath, config: SerialConfig()), downloadDirectory: dst)
+        session.autoZmodem = false
+        session.traceDirectory = try tempDir()
+        let events = Inbox<SessionEvent>()
+        session.onEvent = { events.add($0) }
+        try session.open()
+        defer { session.close() }
+        try session.startTransfer(.ymodemReceive)
+        let deadline = Uptime.now + 10
+        while line.log.events(.delivered, "A→B").flatMap(\.bytes).filter({ $0 == 0x43 }).count < 2 && Uptime.now < deadline {
+            usleep(20_000)
+        }
+        signal(SIGPIPE, SIG_IGN)
+        let remote = try line.run(try #require(Lrzsz.find(["lsb", "sb"])), ["-b"] + files.map(\.lastPathComponent), in: src)
+        defer { if remote.isRunning { remote.terminate() } }
+
+        let finished = events.wait(timeout: 60) { $0.contains { if case .transferFinished = $0 { true } else { false } } }
+        #expect(finished)
+        let trace = session.lastTraceURL.flatMap { try? String(contentsOf: $0, encoding: .utf8) } ?? ""
+        for case let .transferFinished(success, message) in events.all {
+            #expect(success, "\(message)")
+            if !success { print("=== YMODEM trace ===\n" + trace.split(separator: "\n").suffix(80).joined(separator: "\n")) }
+        }
+        for f in files {
+            let got = try? Data(contentsOf: dst.appendingPathComponent(f.lastPathComponent))
+            #expect(got == (try Data(contentsOf: f)), "\(f.lastPathComponent) differs")
+        }
+    }
+
     /// lrzsz at end B with the pty as its terminal, as on a device; no relay in between.
     @Test(.enabled(if: Lrzsz.installed, "lrzsz not installed (brew install lrzsz)"),
           arguments: ["remote sends", "remote receives"])

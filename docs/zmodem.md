@@ -275,7 +275,8 @@ These protocols have no headers; the trace shows what they do have, at the same 
   `block 0: end of batch`;
 - every damaged block with the reason (`bad block: CRC-16 mismatch in block 12`, `cut short after
   991 of 1028 bytes`), the bytes purged before the NAK, and duplicates (`duplicate block 18;
-  acknowledging it again`: the ACK was lost);
+  acknowledging it again`: the ACK was lost; or `duplicate block 0, answering an earlier request
+  of ours; not acknowledging it again`);
 - every NAK received and each resend (`NAK for block 12`, `sending block 12 again (attempt 2)`),
   further NAKs taken as part of one (`after the NAK: 15 15 (taken as part of it)`), and the EOT
   exchange (a receiver NAKs the first EOT, in case it was noise);
