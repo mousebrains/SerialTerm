@@ -25,6 +25,7 @@ final class ZmodemReceiver {
     /// The file being written, removed if the transfer fails part way, and its identity, so the
     /// removal can't hit a file that has replaced it meanwhile.
     private var partial: (url: URL, inode: UInt64)?
+    private let marks = QuarantineMarks()
     /// Files offered so far in this session, and their announced bytes, for batch progress.
     private var offeredFiles = 0
     private var offeredBytes = 0
@@ -33,7 +34,10 @@ final class ZmodemReceiver {
 
     func run() throws -> Result {
         var result = Result()
-        defer { removePartial() }
+        defer {
+            removePartial()
+            marks.wait()
+        }
         // Until a file is offered this may be no transfer at all (a header in ordinary output);
         // keep what arrives so it can be shown if so.
         reader.startCapture()
@@ -51,13 +55,16 @@ final class ZmodemReceiver {
         // long, and what it sent is then shown after all.
         var timeouts = 0, noise = 0, echoes = 0, unproductive = 0
         var noiseSince: TimeInterval?
+        /// A ZDATA header has come: what follows up to the next header is a sender's data.
+        var resent = false
         defer { reader.deadline = nil }
         while true {
             reader.waitingFor = "a file from the sender"
             reader.deadline = noiseSince.map { $0 + timeout }
             let h: ZHeader?
             do {
-                h = try reader.readHeader(timeout: timeout, garbageLimit: 1024)
+                defer { resent = false }
+                h = try reader.readHeader(timeout: timeout, garbageLimit: resent ? 1 << 22 : 1024)
             } catch ZmodemError.timeout {
                 if let start = noiseSince, Uptime.now >= start + timeout {
                     throw ZmodemError.protocolError("No ZMODEM sender (only noise received)")
@@ -79,9 +86,16 @@ final class ZmodemReceiver {
             if unproductive > 40 { throw ZmodemError.protocolError("No file offered by the sender") }
 
             switch h.frame {
-            case .rqinit, .eof, .data:
+            case .rqinit, .eof:
                 // Sender (re)starting, or it missed our ZRINIT after the last file.
                 sendReceiverInit()
+            case .data:
+                // Data for a file we have: our answer to its ZEOF was late, and the sender went
+                // back to where we last confirmed. Answer again, and let the data go by up to the
+                // next header, as after a ZRPOS: it's a sender's, not noise.
+                link.trace?.note("data at \(h.position) for a file already received; skipping it")
+                sendReceiverInit()
+                resent = true
             case .rinit:
                 // That's what we send: the remote is echoing us (or is a receiver too). Answering
                 // would echo back and forth forever.
@@ -100,9 +114,11 @@ final class ZmodemReceiver {
                 reader.stopCapture()
                 unproductive = 0
                 noise = 0
-                if let url = try receiveFile(info: info) {
+                // Its size as counted: asking the file system can wait on the file's quarantine mark,
+                // and the sender is waiting for our answer to its ZEOF.
+                if let (url, bytes) = try receiveFile(info: info) {
                     result.received.append(url)
-                    result.bytes += (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                    result.bytes += bytes
                 }
                 sendReceiverInit()
             case .fin:
@@ -154,6 +170,8 @@ final class ZmodemReceiver {
     private func removePartial() {
         guard let p = partial else { return }
         partial = nil
+        // The mark goes by path: not on whatever might take the file's place.
+        marks.wait()
         // Only if the path is still the file we created.
         var st = stat()
         if lstat(p.url.path, &st) == 0, UInt64(st.st_ino) == p.inode {
@@ -161,8 +179,8 @@ final class ZmodemReceiver {
         }
     }
 
-    /// Returns the saved file, or nil if it was skipped.
-    private func receiveFile(info: [UInt8]) throws -> URL? {
+    /// Returns the saved file and its size, or nil if it was skipped.
+    private func receiveFile(info: [UInt8]) throws -> (URL, Int)? {
         let meta = FileInfo(info)
         // The name as it may appear in logs and traces: it comes from the remote.
         let name = SessionLogger.escapeNote(meta.name)
@@ -185,7 +203,7 @@ final class ZmodemReceiver {
         var st = stat()
         partial = (url, fstat(handle.fileDescriptor, &st) == 0 ? UInt64(st.st_ino) : 0)
         defer { try? handle.close() }
-        Self.quarantine(url)
+        marks.add(url)
 
         link.log("Receiving \(name)\(meta.size.map { " (\($0) bytes)" } ?? "") → \(url.lastPathComponent)")
         link.startFile(at: 0)
@@ -303,7 +321,7 @@ final class ZmodemReceiver {
                 link.fileFinished()
                 link.progress("Received", url.lastPathComponent, offset, meta.size, force: true)
                 link.log("Received \(url.lastPathComponent) (\(offset) bytes)")
-                return url
+                return (url, offset)
             case .file:
                 // The sender didn't see our ZRPOS; read its offer again and answer.
                 _ = try readOfferSubpacket(h)
@@ -423,5 +441,30 @@ final class ZmodemReceiver {
         var url = url
         try? url.setResourceValues(values)
         #endif
+    }
+}
+
+/// Marks received files as downloaded (`ZmodemReceiver.quarantine`) on another thread, so the
+/// answer to the sender doesn't wait for it: on a busy Mac it has taken seconds, and a sender
+/// that hears nothing for its timeout offers the file again. `wait` before a file is moved,
+/// removed, or reported received.
+final class QuarantineMarks {
+    private let group = DispatchGroup()
+
+    /// On a thread of its own: with GCD's global threads all busy, a block can wait seconds to start.
+    func add(_ url: URL) {
+        group.enter()
+        let thread = Thread { [group] in
+            ZmodemReceiver.quarantine(url)
+            group.leave()
+        }
+        thread.name = "Quarantine mark"
+        thread.qualityOfService = .userInitiated
+        thread.start()
+    }
+
+    /// Returns once every file added has been marked.
+    func wait() {
+        group.wait()
     }
 }

@@ -47,6 +47,8 @@ swift test -c release --filter ZmodemPerformanceTests         # throughput (rele
 | `ZmodemNativeTransferTests` | Native ↔ native: multi-file, block-boundary sizes, corrupted and dropped data, a corrupted back channel, cancel, timeouts, no overwriting |
 | `ZmodemDiagnosticsTests` | Trace contents at each level; error snapshots; workaround options on the wire |
 | `ZmodemEndToEndTests` | ZMODEM, YMODEM and XMODEM against lrzsz over a pty, both directions; noisy line; each ZMODEM workaround; XMODEM checksum and CRC, 128 and 1K blocks (skipped if lrzsz is missing) |
+| `LineEmulatorTests` | The emulated line itself: its rate, latency, jitter that keeps order, holding a writer off, overrun, USB-style packets, seeded damage, outages, stalls |
+| `TransfersOverEmulatedLineTests` | Sessions at both ends of an emulated line, or lrzsz on its own terminal at one: a fast cable through an adapter, a noisy line, a satellite call, YMODEM from `lsb` over slow and uneven lines, receivers that lose replies or go quiet after errors (a Slocum glider at 921600), late answers to a file offer and to ZEOF, a modem's buffer holding data after ZEOF, and lsb starting after two requests are waiting for it |
 | `XmodemCodecTests`, `XmodemNativeTransferTests`, `XmodemScriptedTests` | Block and YMODEM header encoding; native ↔ native at every block-boundary size, checksum mode, noise both ways, cancel from either end, no overwriting; scripted peers for the handshake (an echoed 'C'), EOT, out-of-step blocks, leftovers |
 | `ZmodemPerformanceTests` | Encoder and end-to-end throughput floors (skipped in debug builds) |
 | `HardwareProbeTests`, `HardwareSendTests`, `HardwareReceiveTests`, `HardwareRawThroughputTests`, `HardwareXmodemTests` | Real devices; skipped unless enabled (below) |
@@ -54,6 +56,28 @@ swift test -c release --filter ZmodemPerformanceTests         # throughput (rele
 The pty-based tests give lrzsz pipes rather than the pty master itself, because lrzsz changes
 and flushes its terminal's modes, and on a pty those are shared with our side. A real remote has
 its own tty.
+
+#### The emulated line
+
+`LineEmulator` (in the tests) joins two pseudo-terminals with an emulated serial line: pty ↔ line ↔
+pty. A `SerialPort` opens one end; the other end takes a second `SerialPort` or a program such as
+lrzsz, which gets that pty as its own terminal. Each direction has its own settings:
+
+- **Time:** a line rate in baud (any rate, 1200 baud to several Mbaud, whatever the ptys' termios
+  rate), a latency, and jitter (uniform, exponential, or an error-correcting modem's resends).
+  Jitter delays whole packets and never reorders them. A stall holds up the packet that completes
+  a chosen pattern, and everything behind it, once: a reply that's late for whatever reason.
+- **Packets:** a size and an idle timer, as a radio or satellite modem sends, or a USB adapter
+  (an FTDI chip sends 62-byte packets and holds a partial one for its latency timer).
+- **Buffering:** a buffer that holds the writer off when it's full, or loses what doesn't fit
+  (a modem without flow control, or a device slower than its line).
+- **Damage:** random bit errors, lost bytes and noise from a seed, so a failure replays exactly;
+  outages at set times; and the scripted filters the in-memory tests use (`Mangler`,
+  `HeaderDropper` and so on).
+
+Unlike the in-memory links, the line takes time: a sender's timeouts start when its data has gone,
+not when it's queued, as on hardware. `log` records every byte delivered, damaged or lost, with its
+time: when a transfer fails, the tests print every trace from both sides and the end of the wire log.
 
 ### Testing against real hardware
 

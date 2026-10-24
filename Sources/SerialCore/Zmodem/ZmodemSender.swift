@@ -444,6 +444,12 @@ final class ZmodemSender {
         var pos = min(start ?? 0, file.count)
         if pos > 0 { link.log("Receiver asked to start \(name) at \(pos)") }
         link.startFile(at: pos)
+        /// After a late answer the file went out more than once, and the receiver answers each
+        /// offer it sees with a ZRPOS (lrzsz too), all before it answers any data. Those answers
+        /// are neither error reports nor duplicates: acting on one goes back to the start, cutting
+        /// short a subpacket on the way, and the receiver's ZRPOS for that looks like a duplicate.
+        let offerStart = start ?? 0
+        var offerAnswersDue = tries - 1
         // Rewinds since the receiver last confirmed new data: one stuck at a position fails the
         // file after 30, but one that keeps making progress, however slowly (a Slocum glider
         // overrunning after every burst), carries on, up to an overall limit that grows with the
@@ -480,16 +486,31 @@ final class ZmodemSender {
             return true
         }
 
-        /// The receiver reports having everything before `p`.
-        func confirm(_ p: Int) {
-            guard p <= file.count, p > confirmed else { return }
+        /// A ZRPOS to pass over: an answer to an earlier offer, or a duplicate.
+        func isStale(_ p: Int) -> Bool {
+            if offerAnswersDue > 0 && p == offerStart {
+                offerAnswersDue -= 1
+                link.log("Ignoring ZRPOS \(p) for \(name): the answer to an earlier offer")
+                return true
+            }
+            return isDuplicate(p)
+        }
+
+        /// The receiver reports having everything before `p`. Returns whether that's new.
+        @discardableResult
+        func confirm(_ p: Int) -> Bool {
+            guard p <= file.count, p > confirmed else { return false }
+            // It has answered data, so after every offer it saw.
+            offerAnswersDue = 0
             confirmed = p
             prods = 0
             errors = 0
+            return true
         }
 
         func rewind(to p: Int, _ why: String) throws {
             guard p >= 0 && p <= file.count else { throw ZmodemError.protocolError("Receiver asked for invalid position \(p)") }
+            offerAnswersDue = 0
             link.discardUnsent()
             lastRewind = (p, Uptime.now)
             ignoredPosition = nil
@@ -584,7 +605,7 @@ final class ZmodemSender {
                             confirm(h!.position)
                             continue stream
                         case .rpos?:
-                            if !isDuplicate(h!.position) {
+                            if !isStale(h!.position) {
                                 try rewind(to: h!.position, "ZRPOS")
                                 continue stream
                             }
@@ -610,7 +631,7 @@ final class ZmodemSender {
                     guard let h = try pollHeader() else { break }
                     switch h.frame {
                     case .rpos:
-                        if isDuplicate(h.position) { continue }
+                        if isStale(h.position) { continue }
                         try rewind(to: h.position, "receiver reported an error")
                         continue stream
                     case .ack:
@@ -647,7 +668,7 @@ final class ZmodemSender {
                 // queued: at low baud rates the queue alone can take longer than the timeout.
                 link.waitForOutput()
                 try checkCancelled()
-                let deadline = Uptime.now + timeout
+                var deadline = Uptime.now + timeout
                 let waitStart = Uptime.now
                 while true {
                     // A receiver still waiting for data ignores ZEOF. If it's waiting at a position
@@ -687,14 +708,17 @@ final class ZmodemSender {
                     case .rinit:
                         return finished()
                     case .rpos:
-                        // A duplicate isn't a reply: keep waiting rather than repeating ZEOF.
-                        if !isDuplicate(h.position) {
+                        // A duplicate (or an offer's answer) isn't a reply: keep waiting rather than
+                        // repeating ZEOF.
+                        if !isStale(h.position) {
                             try rewind(to: h.position, "ZRPOS after ZEOF")
                             continue stream
                         }
                     case .ack:
-                        // A late answer to a ZCRCQ.
-                        confirm(h.position)
+                        // A late answer to a ZCRCQ. If it's new, the receiver is still taking in
+                        // data that was on its way (in a modem's buffer, say): wait for its answer
+                        // to ZEOF from now, rather than resend data it's about to have.
+                        if confirm(h.position) { deadline = Uptime.now + timeout }
                     case .skip:
                         return .skipped
                     case .abort, .ferr, .can:

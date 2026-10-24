@@ -84,7 +84,9 @@ Files of 4 GiB or more are refused before the transfer starts: ZMODEM positions 
   becomes `received`. Existing files are never overwritten, even one created a moment earlier by
   another window, and a symlink is never followed; the new copy is saved as `name (1).ext`.
 - Received files are marked as downloaded (`com.apple.quarantine`), as browsers do, so macOS
-  checks a received app or script before it can run.
+  checks a received app or script before it can run. The mark is made alongside the transfer,
+  so answers to the sender don't wait for it (on a busy Mac it has taken seconds), and it's in
+  place before the file is reported received.
 - The modification time is set from the file offer. Sizes and counts in the offer are clamped to
   sensible ranges.
 - If the received length differs from the announced size, the session log notes it.
@@ -115,6 +117,12 @@ fell into step with it, so every restart crossed the receiver's next `ZRPOS`, wh
 skipping input. The restart's header was lost each time, and the transfer failed after three
 rounds.
 
+If the answer to a file offer comes after the timeout, the sender offers the file again, and the
+receiver answers every offer it sees (SerialTerm's receiver and lrzsz's both do). The answers to
+the earlier offers arrive after the data has started. The sender passes over as many of them as
+it made extra offers, when they ask for the start of the file, rather than taking them for error
+reports: going back for one cut a subpacket short, and could end with the whole file sent twice.
+
 Blocks larger than ZMODEM's standard 1024 bytes need a receiver that takes them. One that doesn't
 (a Slocum glider) only asks for the same offset again. After two restarts in a row without
 progress, the sender falls back to 1024-byte blocks for the rest of the session.
@@ -123,8 +131,11 @@ Some receivers (Slocum gliders at 921600 baud) go quiet after losing data, witho
 again, or their request is lost. If `ZEOF` gets no reply, the sender resends from the last
 position the receiver confirmed (its last `ZRPOS` or `ZACK`; the `ZCRCQ` every 32 KB keeps that
 recent): a receiver waiting there takes the data, and one elsewhere answers with a `ZRPOS` giving
-its position. It does this up to three times in a row without progress. A `ZRINIT` that arrives
-late, after such a resend has started, is taken as the answer to `ZEOF`.
+its position. It does this up to three times in a row without progress. A `ZACK` confirming new
+data while it waits restarts the wait: the receiver is still taking in data that was on its way
+(in a modem's buffer, say). A `ZRINIT` that arrives
+late, after such a resend has started, is taken as the answer to `ZEOF`. A receiver that already
+has the whole file answers the resend with `ZRINIT` again and lets its data go by.
 
 The receiver asks for data again (`ZRPOS`) whenever it has had no new data for the timeout,
 however busy the line is meanwhile with other traffic: stale `ZEOF`s, headers it ignores, or
@@ -138,6 +149,7 @@ Limits:
 - Receiving: 50 resend requests in a row without progress, and 50 plus one per 4 KB received in
   all. While waiting for a file: 10 silent timeouts, 16 bad headers or runs of noise, noise for
   one timeout without a valid header, 3 echoes of our own `ZRINIT`, or 40 headers without a file.
+  Data after a `ZDATA` header (a resend of a file already received) isn't noise.
   A damaged or truncated file offer is answered with `ZNAK`, so the sender offers it again.
 
 Five consecutive CAN bytes (`0x18`) from the remote abort the transfer. A local cancel, or a fatal
@@ -265,7 +277,8 @@ These protocols have no headers; the trace shows what they do have, at the same 
   `block 0: end of batch`;
 - every damaged block with the reason (`bad block: CRC-16 mismatch in block 12`, `cut short after
   991 of 1028 bytes`), the bytes purged before the NAK, and duplicates (`duplicate block 18;
-  acknowledging it again`: the ACK was lost);
+  acknowledging it again`: the ACK was lost; or `duplicate block 0, answering an earlier request
+  of ours; not acknowledging it again`);
 - every NAK received and each resend (`NAK for block 12`, `sending block 12 again (attempt 2)`),
   further NAKs taken as part of one (`after the NAK: 15 15 (taken as part of it)`), and the EOT
   exchange (a receiver NAKs the first EOT, in case it was noise);

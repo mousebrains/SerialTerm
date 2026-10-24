@@ -13,10 +13,20 @@ final class PtyPair {
     let slavePath: String
     private let slave: Int32
 
-    init() throws {
+    /// With `rawAt`, the slave starts in raw mode at that rate (so nothing is echoed or translated
+    /// before a program at that end sets its own modes); otherwise in the system's default modes.
+    init(rawAt speed: speed_t? = nil) throws {
         var m: Int32 = -1, s: Int32 = -1
         var name = [CChar](repeating: 0, count: 128)
-        guard openpty(&m, &s, &name, nil, nil) == 0 else { throw POSIXError(.ENOTTY) }
+        var t = termios()
+        if let speed {
+            cfmakeraw(&t)
+            t.c_cflag |= tcflag_t(CREAD | CLOCAL | CS8)
+            withUnsafeMutableBytes(of: &t.c_cc) { $0[Int(VMIN)] = 1 }
+            cfsetspeed(&t, speed)
+        }
+        let opened = speed == nil ? openpty(&m, &s, &name, nil, nil) : openpty(&m, &s, &name, &t, nil)
+        guard opened == 0 else { throw POSIXError(.ENOTTY) }
         master = m
         // Keep the slave open so the master doesn't see hangups between opens.
         slave = s
@@ -180,7 +190,10 @@ struct ZmodemEndToEndTests {
                 }
                 if n > 0 {
                     let d = Data(buf[0..<n])
-                    let out = toRemoteMangler?.apply(d) ?? d
+                    var out = toRemoteMangler?.apply(d) ?? d
+                    // Release what the filter holds back once the line pauses (nothing more within 5 ms).
+                    var pfd = pollfd(fd: master, events: Int16(POLLIN), revents: 0)
+                    if let toRemoteMangler, poll(&pfd, 1, 5) == 0 { out += toRemoteMangler.flush() }
                     guard let lineRate else {
                         try? stdinHandle.write(contentsOf: out)
                         return

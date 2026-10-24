@@ -286,6 +286,33 @@ struct SessionLifecycleTests {
         #expect(released == nil)
     }
 
+    /// A transfer holds an activity assertion (against App Nap and idle sleep) while it runs, and
+    /// lets it go when it ends, however it ends.
+    @Test func aTransferHoldsAnActivityWhileItRuns() throws {
+        let pty = try PtyPair()
+        let dir = try tempDir()
+        let file = dir.appendingPathComponent("f.bin")
+        try Data(repeating: 1, count: 1_000).write(to: file)
+        let session = Session(port: SerialPort(path: pty.slavePath, config: SerialConfig()), downloadDirectory: dir)
+        let events = Inbox<SessionEvent>()
+        session.onEvent = { events.add($0) }
+        try session.open()
+        defer { session.close() }
+        #expect(session.transferActivity == nil)
+        try session.startTransfer(.zmodemSend([file]))  // nobody answers; the sender waits for ZRINIT
+        #expect(session.transferActivity != nil)
+        session.cancelTransfer()
+        func finished(_ n: Int) -> Bool {
+            events.wait(timeout: 10) { $0.filter { if case .transferFinished = $0 { true } else { false } }.count >= n }
+        }
+        #expect(finished(1))
+        #expect(session.transferActivity == nil)
+        // And one that fails lets it go too.
+        try session.startTransfer(.xmodemSend(dir.appendingPathComponent("gone.bin")), startRemote: true)
+        #expect(finished(2))
+        #expect(session.transferActivity == nil)
+    }
+
     /// Closing waited on the caller's thread (the main thread, from the window) for the transfer
     /// to stop and the abort to go out; in the background, the caller goes on at once.
     @Test func closeInBackgroundStillAbortsTheRemote() throws {

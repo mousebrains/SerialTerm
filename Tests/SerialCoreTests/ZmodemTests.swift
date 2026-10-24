@@ -126,16 +126,26 @@ struct ZmodemCodecTests {
     }
 }
 
-/// Something that alters the bytes going one way on a test line.
+/// Something that alters the bytes going one way on a test line. The bytes come in whatever pieces
+/// the line delivers, so a filter looking for a pattern must find it across pieces too.
 protocol LineFilter: AnyObject, Sendable {
     func apply(_ data: Data) -> Data
+    /// Bytes held back because they might begin a pattern, released when the line pauses.
+    func flush() -> Data
+}
+
+extension LineFilter {
+    func flush() -> Data { Data() }
 }
 
 /// Applies filters in turn.
 final class FilterChain: LineFilter, @unchecked Sendable {
     private let filters: [any LineFilter]
     init(_ filters: any LineFilter...) { self.filters = filters }
+    init(_ filters: [any LineFilter]) { self.filters = filters }
     func apply(_ data: Data) -> Data { filters.reduce(data) { $1.apply($0) } }
+    /// What one filter releases goes through the ones after it.
+    func flush() -> Data { filters.reduce(Data()) { $1.apply($0) + $1.flush() } }
 }
 
 /// Drops or flips bytes at chosen offsets of a stream, to exercise error recovery.
@@ -205,39 +215,65 @@ final class PatternMangler: LineFilter, @unchecked Sendable {
 }
 
 /// Removes the nth occurrence of a header (its first bytes given by `pattern`) and the
-/// `length - pattern.count` bytes after it, e.g. to lose one ZRPOS on the back channel.
+/// `length - pattern.count` bytes after it, e.g. to lose one ZRPOS on the back channel. With
+/// `after`, counts only occurrences once that has gone by. Holds back bytes that may begin the
+/// header until that's settled, since the header may come in two pieces.
 final class HeaderDropper: LineFilter, @unchecked Sendable {
     private let lock = NSLock()
     private let pattern: [UInt8]
     private let occurrence: Int
     private let length: Int
+    private let after: [UInt8]?
+    private var armed: Bool
     private var recent: [UInt8] = []
+    private var held: [UInt8] = []
     private var found = 0
     private var dropping = 0
+    private var _dropped = false
 
-    init(_ pattern: [UInt8], occurrence: Int, length: Int) {
+    init(_ pattern: [UInt8], occurrence: Int, length: Int, after: [UInt8]? = nil) {
         self.pattern = pattern
         self.occurrence = occurrence
         self.length = length
+        self.after = after
+        armed = after == nil
     }
+
+    /// Whether it has removed the header.
+    var dropped: Bool { lock.withLock { _dropped } }
 
     func apply(_ data: Data) -> Data {
         lock.withLock {
             var out = Data()
             for b in data {
                 if dropping > 0 { dropping -= 1; continue }
-                out.append(b)
-                recent.append(b)
-                if recent.count > pattern.count { recent.removeFirst() }
-                if recent == pattern {
-                    found += 1
-                    if found == occurrence {
-                        out.removeLast(pattern.count)
-                        dropping = length - pattern.count
-                    }
+                if !armed, let after {
+                    out.append(b)
+                    recent.append(b)
+                    if recent.count > after.count { recent.removeFirst() }
+                    armed = recent == after
+                    continue
                 }
+                held.append(b)
+                while !held.isEmpty && !pattern.starts(with: held) { out.append(held.removeFirst()) }
+                guard held.count == pattern.count else { continue }
+                found += 1
+                if found == occurrence {
+                    _dropped = true
+                    dropping = length - pattern.count
+                } else {
+                    out.append(contentsOf: held)
+                }
+                held = []
             }
             return out
+        }
+    }
+
+    func flush() -> Data {
+        lock.withLock {
+            defer { held = [] }
+            return Data(held)
         }
     }
 }
@@ -272,7 +308,7 @@ final class OversizeSubpacketBreaker: LineFilter, @unchecked Sendable {
 
 /// Loses the first hex ZRPOS for each position, and passes repeats: a receiver that reports an
 /// error and is then silent until prodded, like a Slocum glider overrun at 921600 baud.
-final class FirstZRPOSDropper: @unchecked Sendable {
+final class FirstZRPOSDropper: LineFilter, @unchecked Sendable {
     private let lock = NSLock()
     private static let start = Array("**\u{18}B09".utf8)
     private var pending: [UInt8] = []
@@ -304,6 +340,13 @@ final class FirstZRPOSDropper: @unchecked Sendable {
             }
             pending.removeFirst(i)
             return out
+        }
+    }
+
+    func flush() -> Data {
+        lock.withLock {
+            defer { pending = [] }
+            return Data(pending)
         }
     }
 }
@@ -487,9 +530,10 @@ struct ZmodemNativeTransferTests {
         let zdata = Array(e.binaryHeader(ZHeader(.data, position: 0), crc32: true).prefix(4))
         let firstError = Mangler(flipAt: [5_000])
         let afterRewind = PatternMangler(after: zdata, occurrence: 2, distance: 3_000)
-        // ZRPOS headers from the receiver: 1st accepts the file, 2nd reports the first error,
-        // 3rd reports the damage after the rewind. Lose the 3rd. (Hex header: 21 bytes with XON.)
-        let lostZRPOS = HeaderDropper(Array("**\u{18}B09".utf8), occurrence: 3, length: 21)
+        // The receiver reports the first error at 4096 and the damage after the rewind at 6144.
+        // Lose the second report: by its position, as a slow answer to the offer brings repeats
+        // of ZRPOS 0 before it. (Hex header: 21 bytes with XON.)
+        let lostZRPOS = HeaderDropper(Array(e.hexHeader(ZHeader(.rpos, position: 6_144)).prefix(14)), occurrence: 1, length: 21)
         sender.onOutput = { receiver.feed(afterRewind.apply(firstError.apply($0))) }
         receiver.onOutput = { sender.feed(lostZRPOS.apply($0)) }
         let logs = Inbox<String>()

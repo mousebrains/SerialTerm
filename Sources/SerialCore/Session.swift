@@ -96,6 +96,11 @@ public final class Session: @unchecked Sendable {
     private static let xmodemPrompt = Array("Give your local XMODEM receive command now.".utf8)
     private static let ymodemPrompt = Array("Give your local YMODEM receive command now.".utf8)
     private var transfer: FileTransfer?
+    /// Held while a transfer runs, so macOS knows work is going on: App Nap would otherwise
+    /// throttle the timers of a transfer in a background window (its timeouts and pacing), and the
+    /// Mac could go to sleep in the middle of it.
+    var transferActivity: NSObjectProtocol? { lock.withLock { activity } }
+    private var activity: NSObjectProtocol?
     /// A transfer is being set up: `transfer` is about to be set.
     private var starting = false
     /// The running transfer was cancelled; waits for the line to drain give up.
@@ -285,6 +290,8 @@ public final class Session: @unchecked Sendable {
         }
         let t = makeTransfer(kind, primed: primed, startRemote: startRemote, settings: s)
         pacer.cancel()
+        let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiated, reason: kind.displayName)
+        lock.withLock { self.activity = activity }
 
         t.onOutput = { [weak self] data in self?.port.write(data) }
         t.typeReceiveCommand = { [weak self] command in
@@ -306,9 +313,11 @@ public final class Session: @unchecked Sendable {
             self.lock.withLock { self.logger }?.note(line)
         }
         t.onFinish = { [weak self, weak t] success, message in
+            ProcessInfo.processInfo.endActivity(activity)
             guard let self else { return }
             let (logger, cancelled): (SessionLogger?, Bool) = self.lock.withLock {
                 if self.transfer === t { self.transfer = nil }
+                if self.activity === activity { self.activity = nil }
                 self.detector.reset()
                 return (self.logger, self.cancelRequested)
             }
@@ -338,8 +347,10 @@ public final class Session: @unchecked Sendable {
         } catch {
             lock.withLock {
                 if transfer === t { transfer = nil }
+                if self.activity === activity { self.activity = nil }
                 detector.reset()
             }
+            ProcessInfo.processInfo.endActivity(activity)
             logger?.note("\(kind.displayName) could not start: \(error)")
             port.setReceiveLatency(SerialPort.idleReceiveLatency)
             if automatic { automaticResult(success: false) }

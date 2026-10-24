@@ -171,7 +171,12 @@ public protocol FileTransfer: AnyObject, Sendable {
   first byte since its last answer with quiet after it (one in a block whose start byte was lost
   would end the file early and be reported complete), and it is NAKed once and never taken alone.
   Two CANs abort where a block should start, five among other bytes. After a bad block it waits
-  for the line to go quiet, however long the block takes, and NAKs once.
+  for the line to go quiet, however long the block takes, and NAKs once. A repeat of the block it
+  acknowledged last gets another ACK when that ACK was lost, but not when the repeat answers a
+  request of its own that reached the sender after the block (two 'C's queued up while lsb
+  started, or a NAK sent on a timeout as the block arrived): the sender has the ACK, and another
+  would count for its next block or its EOT. Those repeats come before the sender's next new
+  block, so the receiver counts its requests that no block has answered yet.
 
   ACKs carry no block number, so a second copy of a block in flight makes every later ACK count
   for the next block, and a damaged last block is then lost with both ends reporting success.
