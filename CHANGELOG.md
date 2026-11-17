@@ -5,6 +5,8 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
 ## [Unreleased]
 
 ### Added
+- Each window can have its own download and upload folders (Transfer ▸ Folders for This Window);
+  the folders in Settings are the defaults for new windows.
 - macOS app (SwiftUI + SwiftTerm) with per-window connections.
 - Port discovery through IOKit: USB product name, serial number and VID/PID; hot-plug updates;
   automatic reconnect to the same adapter, matched by serial number.
@@ -77,6 +79,9 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
   toolchain problem; building again finishes it.)
 
 ### Fixed
+- A ZMODEM receive into a download folder that didn't exist skipped every file and still reported
+  success ("No files received"). The folder is now created when the first file arrives (unless its
+  volume isn't mounted), and files that can't be saved fail the transfer with the reason.
 - ZMODEM send could livelock with lrzsz's `rz` after a resend's `ZDATA` header was lost. Seen once
   on CI (PR #17).
   - The receiver kept asking for the same offset, and the sender ignored those repeats as

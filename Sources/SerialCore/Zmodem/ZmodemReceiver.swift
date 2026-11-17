@@ -20,6 +20,9 @@ final class ZmodemReceiver {
     struct Result {
         var received: [URL] = []
         var bytes = 0
+        /// Files offered but not saved (skipped), and why the last one couldn't be.
+        var notSaved = 0
+        var notSavedReason: String?
     }
 
     /// The file being written, removed if the transfer fails part way, and its identity, so the
@@ -116,9 +119,15 @@ final class ZmodemReceiver {
                 noise = 0
                 // Its size as counted: asking the file system can wait on the file's quarantine mark,
                 // and the sender is waiting for our answer to its ZEOF.
-                if let (url, bytes) = try receiveFile(info: info) {
+                switch try receiveFile(info: info) {
+                case let .saved(url, bytes):
                     result.received.append(url)
                     result.bytes += bytes
+                case let .notSaved(reason):
+                    result.notSaved += 1
+                    result.notSavedReason = reason
+                case .skippedBySender:
+                    break
                 }
                 sendReceiverInit()
             case .fin:
@@ -179,8 +188,15 @@ final class ZmodemReceiver {
         }
     }
 
-    /// Returns the saved file and its size, or nil if it was skipped.
-    private func receiveFile(info: [UInt8]) throws -> (URL, Int)? {
+    enum FileOutcome {
+        case saved(URL, Int)
+        /// Skipped: it couldn't be created (the reason says why).
+        case notSaved(String)
+        /// The sender gave up on it.
+        case skippedBySender
+    }
+
+    private func receiveFile(info: [UInt8]) throws -> FileOutcome {
         let meta = FileInfo(info)
         // The name as it may appear in logs and traces: it comes from the remote.
         let name = SessionLogger.escapeNote(meta.name)
@@ -196,9 +212,10 @@ final class ZmodemReceiver {
         do {
             (url, handle) = try Self.createUnique(in: directory, for: meta.name)
         } catch {
-            link.log("Cannot save \(name) in \(directory.path): \(error.localizedDescription); skipping")
+            let reason = Self.cannotSave(name, in: directory, error)
+            link.log(reason + "; skipping")
             link.sendHex(ZHeader(.skip))
-            return nil
+            return .notSaved(reason)
         }
         var st = stat()
         partial = (url, fstat(handle.fileDescriptor, &st) == 0 ? UInt64(st.st_ino) : 0)
@@ -321,14 +338,14 @@ final class ZmodemReceiver {
                 link.fileFinished()
                 link.progress("Received", url.lastPathComponent, offset, meta.size, force: true)
                 link.log("Received \(url.lastPathComponent) (\(offset) bytes)")
-                return (url, offset)
+                return .saved(url, offset)
             case .file:
                 // The sender didn't see our ZRPOS; read its offer again and answer.
                 _ = try readOfferSubpacket(h)
                 link.sendHex(ZHeader(.rpos, position: offset))
             case .skip:
                 removePartial()
-                return nil
+                return .skippedBySender
             case .nak:
                 link.sendHex(ZHeader(.rpos, position: offset))
             case .abort, .ferr, .can, .fin:
@@ -407,7 +424,10 @@ final class ZmodemReceiver {
     /// Creates a new file with a safe name in `directory`, "name (1).ext" style if the name is
     /// taken. It never replaces anything, even a file another window created a moment ago, and
     /// never follows a symlink.
+    /// A missing `directory` is created first (as the log folder is), unless it is on a volume
+    /// that isn't mounted: creating it then would put the files on the startup disk instead.
     static func createUnique(in directory: URL, for remoteName: String) throws -> (URL, FileHandle) {
+        try ensureDirectory(directory)
         let (stem, ext) = safeName(remoteName)
         for n in 0..<10_000 {
             let url = directory.appendingPathComponent(name(stem, ext, n))
@@ -416,6 +436,44 @@ final class ZmodemReceiver {
             guard errno == EEXIST else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         }
         throw POSIXError(.EEXIST)
+    }
+
+    static func ensureDirectory(_ directory: URL) throws {
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDir) {
+            if !isDir.boolValue { throw DirectoryProblem.notAFolder }
+            return
+        }
+        let parts = directory.standardizedFileURL.pathComponents
+        if parts.count > 2, parts[1] == "Volumes", !FileManager.default.fileExists(atPath: "/Volumes/" + parts[2]) {
+            throw DirectoryProblem.volumeNotMounted(parts[2])
+        }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    }
+
+    enum DirectoryProblem: Error, LocalizedError {
+        case notAFolder
+        case volumeNotMounted(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .notAFolder: return "it is a file, not a folder"
+            case let .volumeNotMounted(name): return "the volume “\(name)” is not mounted"
+            }
+        }
+    }
+
+    /// Why `name` couldn't be saved, for the log and the transfer's result.
+    static func cannotSave(_ name: String, in directory: URL, _ error: Error) -> String {
+        let why: String
+        switch error {
+        case let e as DirectoryProblem: why = e.localizedDescription
+        case let e as POSIXError: why = String(cString: strerror(e.code.rawValue))
+        case let e as CocoaError:
+            why = (e.userInfo[NSUnderlyingErrorKey] as? NSError)?.localizedDescription ?? e.localizedDescription
+        default: why = error.localizedDescription
+        }
+        return "Cannot save \(name) in \(directory.path): \(why)"
     }
 
     /// The first unused safe name for `remoteName` in `directory` (for files lrzsz received,

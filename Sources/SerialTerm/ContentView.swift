@@ -259,6 +259,16 @@ struct ContentView: View {
             Button("Open Last Transfer Trace") { model.openLastTrace() }
                 .disabled(model.lastTraceURL == nil)
             Button("Show Download Folder") { model.revealDownloads() }
+            Section("Folders for This Window") {
+                Button("Save Received Files to “\(model.downloadDirectory.lastPathComponent)”…") {
+                    model.chooseDownloadDirectory()
+                }
+                Button("Choose Files to Send from “\(model.uploadDirectory.lastPathComponent)”…") {
+                    model.chooseUploadDirectory()
+                }
+                Button("Use Folders from Settings") { model.useDefaultFolders() }
+                    .disabled(!model.hasOwnFolders)
+            }
         } label: {
             Label("Transfer", systemImage: "arrow.up.arrow.down.circle")
         }
@@ -497,9 +507,14 @@ struct SettingsWindow: View {
             .tabItem { Label("General", systemImage: "gearshape") }
 
             Form {
-                Section("Folders") {
+                Section {
                     FolderRow(title: "Save received files to", url: $settings.prefs.downloadDirectory)
                     FolderRow(title: "Choose files to send from", url: $settings.prefs.uploadDirectory)
+                } header: {
+                    Text("Folders")
+                } footer: {
+                    Text("Used by new windows. A window can have folders of its own: choose them from its Transfer menu.")
+                        .foregroundStyle(.secondary)
                 }
                 Section("Automatic transfers") {
                     Toggle("Start transfers automatically (remote sz/rz, and lrzsz sx/sb)", isOn: $settings.prefs.autoZmodem)
@@ -675,13 +690,17 @@ private struct FolderRow: View {
     var body: some View {
         LabeledContent(title) {
             HStack {
+                // Re-checked whenever the view is drawn; a folder that's missing is created when needed.
+                let exists = FileManager.default.fileExists(atPath: url.path)
                 Button {
                     NSWorkspace.shared.open(url)
                 } label: {
-                    Label(url.lastPathComponent, systemImage: "folder")
+                    Label(url.lastPathComponent + (exists ? "" : " (not created yet)"),
+                          systemImage: exists ? "folder" : "folder.badge.questionmark")
                 }
                 .buttonStyle(.link)
-                .help(url.path)
+                .disabled(!exists)
+                .help(exists ? url.path : "\(url.path) doesn't exist yet; it is created when it is first needed")
                 Button("Choose…") {
                     let panel = NSOpenPanel()
                     panel.canChooseDirectories = true

@@ -142,7 +142,7 @@ final class XmodemReceiver {
                 (url, handle) = try ZmodemReceiver.createUnique(in: directory, for: meta.name)
             } catch {
                 // YMODEM can't skip a file; stopping is all that's left.
-                throw ZmodemError.fileError("Cannot save \(shown) in \(directory.path): \(error.localizedDescription)")
+                throw ZmodemError.fileError(ZmodemReceiver.cannotSave(shown, in: directory, error))
             }
             defer { try? handle.close() }
             track(url, handle)

@@ -21,6 +21,10 @@ struct ConnectionSettings: Codable, Equatable {
     var pacing = Pacing()
     /// Typed before a ZMODEM send to start the device's receiver: "rz", "zr" (Slocum), or "" for none.
     var zmodemReceiveCommand = "rz"
+    /// This window's folders for received and sent files; nil uses the default from Settings.
+    /// Not carried to new windows (see `forNewWindows`) or saved in presets.
+    var downloadDirectory: URL?
+    var uploadDirectory: URL?
 
     init() {}
 
@@ -35,6 +39,17 @@ struct ConnectionSettings: Codable, Equatable {
         backspaceSendsControlH = (try? c.decode(Bool.self, forKey: .backspaceSendsControlH)) ?? d.backspaceSendsControlH
         pacing = ((try? c.decode(Pacing.self, forKey: .pacing)) ?? d.pacing).sanitized
         zmodemReceiveCommand = (try? c.decode(String.self, forKey: .zmodemReceiveCommand)) ?? d.zmodemReceiveCommand
+        downloadDirectory = try? c.decode(URL.self, forKey: .downloadDirectory)
+        uploadDirectory = try? c.decode(URL.self, forKey: .uploadDirectory)
+    }
+
+    /// These settings as the default for new windows: the port and line settings, but not this
+    /// window's own folders, so a new window starts with the folders chosen in Settings.
+    var forNewWindows: ConnectionSettings {
+        var c = self
+        c.downloadDirectory = nil
+        c.uploadDirectory = nil
+        return c
     }
 
     /// Switch to `path`, remembering which device it is: `info` is the port as listed now, if it is.

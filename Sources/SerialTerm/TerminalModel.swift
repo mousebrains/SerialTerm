@@ -76,7 +76,7 @@ final class TerminalModel: ObservableObject {
     init(settings: AppSettings? = nil) {
         let settings = settings ?? .shared
         self.settings = settings
-        connection = settings.prefs.lastConnection
+        connection = settings.prefs.lastConnection.forNewWindows
         appliedPrefs = settings.prefs
         display.flush = { [weak self] bytes in
             self?.terminalView?.feed(byteArray: bytes[...])
@@ -87,6 +87,13 @@ final class TerminalModel: ObservableObject {
         }
         Self.all.add(self)
     }
+
+    /// Where this window saves received files: its own folder, or the default from Settings.
+    var downloadDirectory: URL { connection.downloadDirectory ?? prefs.downloadDirectory }
+    /// Where this window's file choosers start: its own folder, or the default from Settings.
+    var uploadDirectory: URL { connection.uploadDirectory ?? prefs.uploadDirectory }
+    /// The window has a folder of its own (rather than the defaults from Settings).
+    var hasOwnFolders: Bool { connection.downloadDirectory != nil || connection.uploadDirectory != nil }
 
     var isTransferring: Bool { transferStatus != nil }
     var canStartTransfer: Bool { isConnected && !isTransferring }
@@ -143,7 +150,7 @@ final class TerminalModel: ObservableObject {
         if let closing = Self.closing.removeValue(forKey: path) { _ = closing.wait(timeout: .now() + 3) }
 
         let port = SerialPort(path: path, config: connection.config)
-        let session = Session(port: port, downloadDirectory: prefs.downloadDirectory)
+        let session = Session(port: port, downloadDirectory: downloadDirectory)
         session.autoZmodem = prefs.autoZmodem
         session.zmodemOptions = prefs.zmodem
         session.xmodem1K = prefs.xmodem1K
@@ -384,7 +391,7 @@ final class TerminalModel: ObservableObject {
 
     func receiveXmodem() {
         let panel = NSSavePanel()
-        panel.directoryURL = prefs.downloadDirectory
+        panel.directoryURL = downloadDirectory
         panel.message = "XMODEM does not send a file name. Save the incoming file as:"
         present(panel) { [weak self] ok in
             guard ok, let url = panel.url else { return }
@@ -404,7 +411,48 @@ final class TerminalModel: ObservableObject {
     }
 
     func revealDownloads() {
-        NSWorkspace.shared.open(prefs.downloadDirectory)
+        let dir = downloadDirectory
+        guard FileManager.default.fileExists(atPath: dir.path) else {
+            NSSound.beep()
+            statusMessage = "The download folder \(dir.path) doesn't exist yet; it is created when a file arrives"
+            return
+        }
+        NSWorkspace.shared.open(dir)
+    }
+
+    /// Asks for a folder where this window saves received files.
+    func chooseDownloadDirectory() {
+        chooseFolder(starting: downloadDirectory, message: "Choose where this window saves received files") { [weak self] url in
+            self?.connection.downloadDirectory = url
+        }
+    }
+
+    /// Asks for a folder where this window's file choosers start.
+    func chooseUploadDirectory() {
+        chooseFolder(starting: uploadDirectory, message: "Choose where this window looks for files to send") { [weak self] url in
+            self?.connection.uploadDirectory = url
+        }
+    }
+
+    /// Back to the folders set in Settings.
+    func useDefaultFolders() {
+        var c = connection
+        c.downloadDirectory = nil
+        c.uploadDirectory = nil
+        connection = c
+    }
+
+    private func chooseFolder(starting: URL, message: String, then: @escaping (URL) -> Void) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.directoryURL = starting
+        panel.message = message
+        panel.prompt = "Choose"
+        present(panel) { ok in
+            if ok, let url = panel.url { then(url) }
+        }
     }
 
     private func startTransfer(_ kind: TransferKind, startRemote: Bool = false) {
@@ -430,12 +478,12 @@ final class TerminalModel: ObservableObject {
         panel.allowsMultipleSelection = multiple
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
-        panel.directoryURL = prefs.uploadDirectory
+        panel.directoryURL = uploadDirectory
         panel.message = multiple ? "Choose one or more files to send (⌘-click to select several)" : "Choose a file to send"
         present(panel) { [weak self] ok in
             if ok, let dir = panel.urls.first?.deletingLastPathComponent() {
-                // Start the next upload where this one was chosen.
-                self?.settings.prefs.uploadDirectory = dir
+                // Start this window's next upload where this one was chosen.
+                if dir != self?.uploadDirectory { self?.connection.uploadDirectory = dir }
             }
             then(ok ? panel.urls : nil)
         }
@@ -507,7 +555,7 @@ final class TerminalModel: ObservableObject {
             guard !transferPanelOpen, let asking = session else { return }
             // XMODEM carries no file name, so ask where to save.
             let panel = NSSavePanel()
-            panel.directoryURL = prefs.downloadDirectory
+            panel.directoryURL = downloadDirectory
             panel.message = "The device is sending a file by XMODEM, which carries no name. Save it as:"
             present(panel) { [weak self, weak asking] ok in
                 guard let self, let session = self.session, session === asking else { return }
@@ -545,7 +593,7 @@ final class TerminalModel: ObservableObject {
         guard !restoring, !revertingConfig else { return }
         if connection.backspaceSendsControlH != old.backspaceSendsControlH { applyTerminalPrefs() }
         if connection.portPath != old.portPath {
-            settings.prefs.lastConnection = connection
+            settings.prefs.lastConnection = connection.forNewWindows
             // Choosing a port connects to it; choosing another switches over.
             wantConnected = false
             reconnectGeneration += 1
@@ -554,6 +602,7 @@ final class TerminalModel: ObservableObject {
             return
         }
         if let session {
+            session.downloadDirectory = downloadDirectory
             session.pacing = connection.pacing
             session.zmodemReceiveCommand = connection.zmodemReceiveCommand
             if connection.config != old.config {
@@ -571,7 +620,7 @@ final class TerminalModel: ObservableObject {
                 }
             }
         }
-        settings.prefs.lastConnection = connection
+        settings.prefs.lastConnection = connection.forNewWindows
     }
 
     private func revertConfig(to config: SerialConfig, because reason: String) {
@@ -640,7 +689,7 @@ final class TerminalModel: ObservableObject {
             session.zmodemOptions = new.zmodem
             session.xmodem1K = new.xmodem1K
             session.traceDirectory = new.logDirectory
-            session.downloadDirectory = new.downloadDirectory
+            session.downloadDirectory = connection.downloadDirectory ?? new.downloadDirectory
             if new.loggingEnabled != old.loggingEnabled || new.logDirectory != old.logDirectory {
                 session.stopLogging()
                 logURL = nil
