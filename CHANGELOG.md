@@ -5,6 +5,8 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
 ## [Unreleased]
 
 ### Added
+- Each window can have its own download and upload folders (Transfer ▸ Folders for This Window);
+  the folders in Settings are the defaults for new windows.
 - macOS app (SwiftUI + SwiftTerm) with per-window connections.
 - Port discovery through IOKit: USB product name, serial number and VID/PID; hot-plug updates;
   automatic reconnect to the same adapter, matched by serial number.

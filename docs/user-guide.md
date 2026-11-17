@@ -116,7 +116,7 @@ Above about 1 Mbaud, use RTS/CTS flow control if the device supports it.
 | Baud menu | Common rates, or Custom… |
 | Presets menu | Apply, save or delete a [preset](#presets) |
 | ⚡ Connect / Disconnect | ⇧⌘K |
-| Transfer menu | ZMODEM / YMODEM / XMODEM send and receive (while connected and no transfer is running), Cancel Transfer, Open Last Transfer Trace, Show Download Folder |
+| Transfer menu | ZMODEM / YMODEM / XMODEM send and receive (while connected and no transfer is running), Cancel Transfer, Open Last Transfer Trace, Show Download Folder, this window's download and send folders |
 | ● Log | Turn session logging on or off: red while this window is logging, grey while logging is on but the window isn't connected, ⚠ when logging is on but the window couldn't open its log |
 | Line menu | Send Break, Send Window Size (stty), Clear Screen |
 | Slider | Data bits, parity, stop bits, flow control, Backspace key, typing pace, ZMODEM receive command; **More Settings…** |
@@ -158,7 +158,10 @@ Open with **SerialTerm ▸ Settings…** (⌘,). These settings apply to all win
 
 **Transfers**
 - *Save received files to* (default: Downloads) and *Choose files to send from* (the file picker's
-  starting folder; it follows your last choice).
+  starting folder) for new windows. Each window can have folders of its own: choose them in its
+  Transfer menu under *Folders for This Window*, or go back to these with *Use Folders from
+  Settings*. A window's send folder follows your last choice in that window, and a window macOS
+  reopens at launch keeps its folders.
 - *Start transfers automatically*: ZMODEM when the remote runs `sz`/`rz`, and XMODEM when lrzsz's
   `sx` announces itself. If three automatic transfers fail within 30 seconds, automatic starts
   pause for 30 seconds, so a device stuck starting and aborting transfers can't restart one

@@ -217,10 +217,11 @@ DECSTR), so one device's modes don't carry over to the next.
 ## Settings
 
 - `ConnectionSettings` (port, its USB serial number and interface, `SerialConfig`, Backspace,
-  pacing, receive command) belongs to a window. It is kept in the window's `@SceneStorage`, so a
-  window macOS reopens at launch gets its own back, and the most recent one is stored as the
-  default for new windows. A change the port refuses is reverted rather than saved.
-- `Preferences` (keyboard, display, folders, transfer options, `ZmodemOptions`) is app-wide. It is
+  pacing, receive command, and the window's own download and upload folders, nil for the ones in
+  `Preferences`) belongs to a window. It is kept in the window's `@SceneStorage`, so a window
+  macOS reopens at launch gets its own back, and the most recent one, less its folders
+  (`forNewWindows`), is stored as the default for new windows. A change the port refuses is reverted rather than saved.
+- `Preferences` (keyboard, display, default folders, transfer options, `ZmodemOptions`) is app-wide. It is
   held by `AppSettings.shared` and saved to `UserDefaults` as JSON under `preferences.v2`.
   Decoding goes field by field, so adding settings never discards saved ones; presets decode one
   by one, so one bad preset is skipped alone; values are clamped to their valid ranges. Settings

@@ -147,6 +147,22 @@ struct PreferencesDecodingTests {
         #expect(prefs.optionAsMeta)
     }
 
+    /// A window's own folders come back with the window, but new windows start from Settings.
+    @Test func windowFoldersStayWithTheWindow() throws {
+        var c = ConnectionSettings()
+        c.portPath = "/dev/cu.usbserial-A"
+        c.downloadDirectory = URL(fileURLWithPath: "/tmp/in", isDirectory: true)
+        c.uploadDirectory = URL(fileURLWithPath: "/tmp/out", isDirectory: true)
+        let back = try JSONDecoder().decode(ConnectionSettings.self, from: JSONEncoder().encode(c))
+        #expect(back == c)
+        let fresh = c.forNewWindows
+        #expect(fresh.downloadDirectory == nil && fresh.uploadDirectory == nil)
+        #expect(fresh.portPath == c.portPath)
+        // Saved by a version without them: the Settings folders apply.
+        let old = try JSONDecoder().decode(ConnectionSettings.self, from: Data(#"{"portPath": "/dev/x"}"#.utf8))
+        #expect(old.downloadDirectory == nil && old.uploadDirectory == nil)
+    }
+
     @Test func roundTrip() throws {
         var prefs = Preferences()
         var c = ConnectionSettings()
