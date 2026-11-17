@@ -651,6 +651,35 @@ struct ZmodemNativeTransferTests {
         #expect(try Data(contentsOf: dst.appendingPathComponent("file0 (1).bin")) == Data(contentsOf: files[0]))
     }
 
+    /// A download folder that doesn't exist yet is created when the first file arrives.
+    @Test func createsAMissingDownloadFolder() throws {
+        let src = try tempDir()
+        let dst = try tempDir().appendingPathComponent("new/sub")
+        let files = try makeFiles(in: src, sizes: [500])
+        let (_, r) = try transfer(files, into: dst)
+        #expect(r.0, "\(r.1)")
+        try expectSame(files, in: dst)
+    }
+
+    /// Files that can't be saved used to end in a quiet "No files received", reported as success.
+    @Test func filesThatCannotBeSavedFailTheTransfer() throws {
+        let src = try tempDir(), parent = try tempDir()
+        let dst = parent.appendingPathComponent("file")
+        try Data("a file, not a folder".utf8).write(to: dst)
+        let files = try makeFiles(in: src, sizes: [100, 200])
+        let (s, r) = try transfer(files, into: dst)
+        #expect(s.0, "\(s.1)")
+        #expect(!r.0)
+        #expect(r.1.hasPrefix("No files saved (2 skipped). Cannot save file1.bin in \(dst.path)"), "\(r.1)")
+        #expect(r.1.hasSuffix("not a folder"), "\(r.1)")
+    }
+
+    @Test func aFolderOnAnUnmountedVolumeIsNotCreated() {
+        let dir = URL(fileURLWithPath: "/Volumes/NoSuchVolume-\(UUID().uuidString)/Downloads")
+        #expect(throws: ZmodemReceiver.DirectoryProblem.self) { try ZmodemReceiver.ensureDirectory(dir) }
+        #expect(!FileManager.default.fileExists(atPath: dir.deletingLastPathComponent().path))
+    }
+
     @Test func localCancelStopsBothSidesAndRemovesPartialFile() throws {
         let src = try tempDir(), dst = try tempDir()
         let files = try makeFiles(in: src, sizes: [4_000_000])

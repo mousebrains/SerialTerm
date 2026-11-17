@@ -227,6 +227,10 @@ one (closing the lid still sleeps it).
 
 **Receiving**: run `sz file1 file2 …` on the device. SerialTerm detects it and receives all the
 files into the download folder.
+- A download folder that doesn't exist yet is created when the first file arrives (but not on a
+  volume that isn't mounted, which would put the files on the startup disk instead).
+- A file that can't be saved is skipped, and the transfer then ends as failed, saying how many
+  files were saved and why the others weren't.
 - An existing file is never overwritten; the new copy is saved as `name (1).ext`.
 - Paths in the remote's file names are removed, so a file can't land outside the download folder.
   Leading dots, control and invisible characters are removed too, and very long names shortened.

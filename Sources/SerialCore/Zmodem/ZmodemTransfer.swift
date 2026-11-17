@@ -112,14 +112,23 @@ public final class ZmodemTransfer: FileTransfer, @unchecked Sendable {
         var success = false
         var message = ""
         var receiver: ZmodemReceiver?
+        var receiverFailed = false
         do {
             switch kind {
             case .zmodemReceive:
                 receiver = ZmodemReceiver(link: link, directory: directory, options: options)
                 let r = try receiver!.run()
-                message = r.received.isEmpty
-                    ? "No files received"
-                    : "Received \(Self.files(r.received.count)) (\(ZLink.size(r.bytes)))"
+                if let reason = r.notSavedReason {
+                    // The protocol went fine, but files were lost: that's not a success.
+                    let offered = r.received.count + r.notSaved
+                    message = (r.received.isEmpty ? "No files saved" : "Saved \(r.received.count) of \(Self.files(offered))")
+                        + (r.notSaved > 1 ? " (\(r.notSaved) skipped). " : ". ") + reason
+                    receiverFailed = true
+                } else {
+                    message = r.received.isEmpty
+                        ? "No files received"
+                        : "Received \(Self.files(r.received.count)) (\(ZLink.size(r.bytes)))"
+                }
             case let .zmodemSend(files):
                 let r = try ZmodemSender(link: link, options: options, receiveCommand: receiveCommand,
                                          typeReceiveCommand: typeReceiveCommand).run(files: files)
@@ -128,7 +137,7 @@ public final class ZmodemTransfer: FileTransfer, @unchecked Sendable {
             default:
                 break
             }
-            success = true
+            success = !receiverFailed
         } catch let error as ZmodemError {
             // Drop file data still queued: after a cancel it would reach the remote's shell once
             // its receiver has gone, and it would hold up our abort.

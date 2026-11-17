@@ -690,13 +690,17 @@ private struct FolderRow: View {
     var body: some View {
         LabeledContent(title) {
             HStack {
+                // Re-checked whenever the view is drawn; a folder that's missing is created when needed.
+                let exists = FileManager.default.fileExists(atPath: url.path)
                 Button {
                     NSWorkspace.shared.open(url)
                 } label: {
-                    Label(url.lastPathComponent, systemImage: "folder")
+                    Label(url.lastPathComponent + (exists ? "" : " (not created yet)"),
+                          systemImage: exists ? "folder" : "folder.badge.questionmark")
                 }
                 .buttonStyle(.link)
-                .help(url.path)
+                .disabled(!exists)
+                .help(exists ? url.path : "\(url.path) doesn't exist yet; it is created when it is first needed")
                 Button("Choose…") {
                     let panel = NSOpenPanel()
                     panel.canChooseDirectories = true

@@ -411,7 +411,13 @@ final class TerminalModel: ObservableObject {
     }
 
     func revealDownloads() {
-        NSWorkspace.shared.open(downloadDirectory)
+        let dir = downloadDirectory
+        guard FileManager.default.fileExists(atPath: dir.path) else {
+            NSSound.beep()
+            statusMessage = "The download folder \(dir.path) doesn't exist yet; it is created when a file arrives"
+            return
+        }
+        NSWorkspace.shared.open(dir)
     }
 
     /// Asks for a folder where this window saves received files.
